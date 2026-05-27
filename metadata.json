@@ -1,0 +1,6 @@
+{
+  "name": "Remix: MarketMind AI",
+  "description": "An AI-powered persona for marketers that collects customer data, provides deep insights, and offers actionable recommendations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
