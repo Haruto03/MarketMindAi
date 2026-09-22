@@ -27,7 +27,7 @@ This application uses Google's latest AI model to power the simulation. You can 
 
 ---
 
-## 📂 Step 2: Extract & Configure the Project Files
+## 📂 Step 2: Get & Configure the Project Files
 
 1. **Extract the ZIP File**
    * Extract (unzip) `MarketMind-AI.zip` to a location of your choice (e.g., your Desktop).
@@ -51,7 +51,7 @@ GEMINI_API_KEY=your_actual_api_key_here
 ## 💻 Step 3: Run the Application via Terminal / Command Prompt
 
 1. **Open your terminal inside the project folder**
-   * **Windows**: Hold the `Shift` key and right-click on any empty space inside the `MarketMind-AI` folder, then select **"Open PowerShell window here"** or **"Open in Terminal"**.
+   * **Windows**: Hold the `Shift` key and right-click on any empty space inside the `MarketMindAi` folder, then select **"Open PowerShell window here"** or **"Open in Terminal"**.
      *(If that doesn't appear, open the Start menu, search for "cmd", open Command Prompt, and navigate to your folder using `cd C:\path\to\MarketMind-AI`)*
    * **macOS / Linux**: Open Terminal, type `cd `, drag-and-drop the extracted folder into the terminal window, and press `Enter`.
 
