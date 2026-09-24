@@ -74,12 +74,12 @@ export async function sendChatMessage(
   history: ChatTurn[],
   message: string,
   persona: Persona,
-  question: string,
+  variants: string[],
 ): Promise<string> {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ history, message, persona, question }),
+    body: JSON.stringify({ history, message, persona, variants }),
   });
   if (!res.ok) throw await errorFromResponse(res);
   const body = (await res.json()) as { reply?: string };

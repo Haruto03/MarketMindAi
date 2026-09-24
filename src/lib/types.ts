@@ -1,6 +1,19 @@
 // Types shared by the browser app and the API server.
 
-export interface Persona {
+/** A persona's reaction to one concept / question variant. */
+export interface VariantResponse {
+  sentimentScore: number;
+  answerToQuestion: string;
+  feedback: string;
+  keywords: string[];
+}
+
+/**
+ * The top-level response fields are the reaction to variant A
+ * (questionOrProductInfo). In an A/B test, `alternatives[i]` holds the same
+ * persona's reaction to alternativeVariants[i] (variant B, C…).
+ */
+export interface Persona extends VariantResponse {
   id: number;
   name: string;
   age: number;
@@ -8,11 +21,8 @@ export interface Persona {
   habits: string;
   location: string;
   incomeLevel: string;
-  sentimentScore: number;
   background: string;
-  answerToQuestion: string;
-  feedback: string;
-  keywords: string[];
+  alternatives?: VariantResponse[];
 }
 
 export interface CustomerData {
@@ -21,8 +31,14 @@ export interface CustomerData {
   habits?: string;
   location?: string;
   incomeLevel?: string;
+  /** Variant A: the product concept / question every persona answers. */
   questionOrProductInfo?: string;
+  /** Optional A/B test: further variants (B, C) shown to the same personas. */
+  alternativeVariants?: string[];
 }
+
+/** At most 3 variants (A + 2 alternatives) per simulation. */
+export const MAX_ALTERNATIVE_VARIANTS = 2;
 
 export interface ChatTurn {
   role: "user" | "model";

@@ -23,9 +23,21 @@ Built by Haruto Iriyama with React, TypeScript, Vite and Tailwind CSS.
    strategic summary — overall enthusiasm, recurring themes, objections and
    recommendations — token by token into the Insights tab while the persona
    cards fill in.
-4. **Interview a persona.** The Chat tab keeps a per-persona conversation
+4. **Explore the charts.** Score distribution across the scoring rubric,
+   every persona's score, and the most common themes.
+5. **Interview a persona.** The Chat tab keeps a per-persona conversation
    history and answers in character, grounded in that persona's profile and
    original feedback.
+
+**A/B testing.** Add up to two more variants (a different price, feature set
+or headline) and the same ten personas score every variant independently.
+Results show each variant's average, median, likely adopters and rejecters,
+call the leading variant (or "too close to call"), and chart which personas
+changed their minds.
+
+**Saved simulations.** Every completed run — inputs, personas, report and
+interview transcripts — is saved in the browser and can be reopened from the
+Saved Simulations tab. The last open run is restored on reload.
 
 ## Architecture
 
@@ -50,14 +62,19 @@ server/
 └── gemini.ts                  prompt building, structured output schema,
                                streaming report, in-character chat
 src/
-├── App.tsx                    tab shell (Configuration / Results / Interviews)
+├── App.tsx                    tab shell, run state, saving to history
 ├── components/
-│   ├── CustomerForm.tsx       focus-group configuration form
-│   ├── InsightsViewer.tsx     persona cards + streaming executive report
-│   └── PersonaChat.tsx        1-on-1 chat with a persona
+│   ├── CustomerForm.tsx       focus-group configuration + A/B variants
+│   ├── InsightsViewer.tsx     persona cards, charts tab, streaming report
+│   ├── SentimentCharts.tsx    recharts visualisations (lazy-loaded)
+│   ├── VariantSummary.tsx     A/B comparison tiles
+│   ├── PersonaChat.tsx        1-on-1 chat with a persona
+│   └── HistoryPanel.tsx       saved simulations list
 └── lib/
     ├── api.ts                 browser client for the API server
+    ├── history.ts             localStorage persistence for saved runs
     ├── types.ts               types shared by browser and server
+    ├── variants.ts            per-variant scores and statistics (shared)
     └── utils.ts
 ```
 

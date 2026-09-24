@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Sparkles, Users, Compass, MapPin, DollarSign, HelpCircle, UserCheck, AlertCircle } from 'lucide-react';
+import { Sparkles, Users, Compass, MapPin, DollarSign, HelpCircle, UserCheck, AlertCircle, GitCompare, Plus, X } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { type CustomerData, DIVERSE_RANDOM } from '../lib/types';
+import { type CustomerData, DIVERSE_RANDOM, MAX_ALTERNATIVE_VARIANTS } from '../lib/types';
+import { VARIANT_LETTERS } from '../lib/variants';
 
 interface CustomerFormProps {
   initialData: CustomerData;
@@ -18,6 +19,10 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
     incomeLevel:          initialData.incomeLevel          ?? '',
     questionOrProductInfo: initialData.questionOrProductInfo ?? '',
   });
+
+  // A/B test: extra variants (B, C) shown to the same personas
+  const [alternatives, setAlternatives] = useState<string[]>(initialData.alternativeVariants ?? []);
+  const isAbTest = alternatives.length > 0;
 
   // Holds an error message for the required field; null means no error
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -48,6 +53,9 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
       incomeLevel:          data.incomeLevel?.trim() || DIVERSE_RANDOM,
       questionOrProductInfo: trimmedQuestion,
     };
+    // Blank variant boxes are ignored rather than sent as empty variants
+    const variants = alternatives.map((v) => v.trim()).filter(Boolean);
+    if (variants.length > 0) payload.alternativeVariants = variants;
 
     onSubmit(payload);
   };
@@ -155,7 +163,7 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
             <div className="md:col-span-2">
               <label className="block text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
                 <HelpCircle className="w-4 h-4 text-blue-400" />
-                Question / Product Concept Info
+                {isAbTest ? 'Variant A — Question / Product Concept' : 'Question / Product Concept Info'}
                 <span className="text-rose-400 ml-0.5" aria-hidden="true">*</span>
                 <span className="text-xs text-rose-400 font-semibold">Required</span>
               </label>
@@ -187,6 +195,51 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
                   {validationError}
                 </p>
               )}
+
+              {/* A/B test variants */}
+              <div className="mt-4 space-y-3">
+                {alternatives.map((text, i) => (
+                  <div key={i}>
+                    <label
+                      htmlFor={`variant-${i}`}
+                      className="block text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2"
+                    >
+                      <GitCompare className="w-4 h-4 text-blue-400" />
+                      Variant {VARIANT_LETTERS[i + 1]}
+                      <button
+                        type="button"
+                        onClick={() => setAlternatives(alternatives.filter((_, j) => j !== i))}
+                        className="ml-auto flex items-center gap-1 text-xs font-normal text-slate-500 hover:text-rose-300"
+                      >
+                        <X className="w-3.5 h-3.5" /> Remove
+                      </button>
+                    </label>
+                    <textarea
+                      id={`variant-${i}`}
+                      className="w-full min-h-[90px] p-3 rounded-xl bg-slate-950/50 border border-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 text-slate-200 placeholder:text-slate-600 transition-all outline-none resize-y"
+                      placeholder="Change one thing to compare — e.g. the same product at $9/month, or a different headline"
+                      value={text}
+                      onChange={(e) => setAlternatives(alternatives.map((v, j) => (j === i ? e.target.value : v)))}
+                    />
+                  </div>
+                ))}
+
+                {alternatives.length < MAX_ALTERNATIVE_VARIANTS && (
+                  <button
+                    type="button"
+                    onClick={() => setAlternatives([...alternatives, ''])}
+                    className="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-slate-300 hover:text-blue-300 border border-dashed border-slate-700 hover:border-blue-500/40 rounded-xl transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {isAbTest ? `Add Variant ${VARIANT_LETTERS[alternatives.length + 1]}` : 'Add a variant to A/B test'}
+                  </button>
+                )}
+                {!isAbTest && (
+                  <p className="text-xs text-slate-500">
+                    Compare up to {MAX_ALTERNATIVE_VARIANTS + 1} versions of your price, features or messaging on the same 10 personas.
+                  </p>
+                )}
+              </div>
             </div>
 
           </div>
@@ -207,7 +260,7 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
             ) : (
               <Sparkles className="w-5 h-5" />
             )}
-            Simulate Focus Group
+            {isAbTest ? 'Run A/B Test' : 'Simulate Focus Group'}
           </button>
         </div>
       </div>

@@ -3,7 +3,7 @@ import path from "path";
 import express, { type Request, type Response, type NextFunction } from "express";
 import rateLimit from "express-rate-limit";
 import { analyzePersonaDataStream, chatWithPersona, generatePersonaBatch, validatePersona } from "./gemini";
-import type { ChatTurn, CustomerData, SimulateEvent } from "../src/lib/types";
+import { MAX_ALTERNATIVE_VARIANTS, type ChatTurn, type CustomerData, type SimulateEvent } from "../src/lib/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration (all overridable through environment variables)
@@ -57,7 +57,19 @@ function parseCustomerData(body: unknown): CustomerData {
     location: optionalString(b.location, "location", MAX_FIELD_CHARS),
     incomeLevel: optionalString(b.incomeLevel, "incomeLevel", MAX_FIELD_CHARS),
     questionOrProductInfo: optionalString(b.questionOrProductInfo, "questionOrProductInfo", MAX_QUESTION_CHARS),
+    alternativeVariants: parseAlternativeVariants(b.alternativeVariants),
   };
+}
+
+function parseAlternativeVariants(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) throw new BadRequest(`"alternativeVariants" must be an array.`);
+  if (value.length > MAX_ALTERNATIVE_VARIANTS) {
+    throw new BadRequest(`At most ${MAX_ALTERNATIVE_VARIANTS} alternative variants are allowed.`);
+  }
+  const variants = value.map((v, i) => optionalString(v, `alternativeVariants[${i}]`, MAX_QUESTION_CHARS)?.trim() ?? "");
+  if (variants.some((v) => !v)) throw new BadRequest("A/B variants must not be empty.");
+  return variants.length > 0 ? variants : undefined;
 }
 
 function parseChatRequest(body: unknown) {
@@ -78,20 +90,27 @@ function parseChatRequest(body: unknown) {
     return { role: t.role, text: optionalString(t.text, `history[${i}].text`, limit) ?? "" };
   });
 
+  if (!Array.isArray(b.variants) || b.variants.length < 1 || b.variants.length > 1 + MAX_ALTERNATIVE_VARIANTS) {
+    throw new BadRequest(`"variants" must be an array of 1 to ${1 + MAX_ALTERNATIVE_VARIANTS} strings.`);
+  }
+  const variants = b.variants.map((v, i) => optionalString(v, `variants[${i}]`, MAX_QUESTION_CHARS) ?? "");
+
   let persona;
   try {
-    persona = validatePersona(b.persona, 0);
+    persona = validatePersona(b.persona, 0, variants.length - 1);
   } catch (e) {
     throw new BadRequest(e instanceof Error ? e.message : "Invalid persona.");
   }
-  for (const [key, value] of Object.entries(persona)) {
-    if (typeof value === "string" && value.length > MAX_PERSONA_FIELD_CHARS) {
-      throw new BadRequest(`persona.${key} is too long.`);
+  const responses = [persona, ...(persona.alternatives ?? [])];
+  for (const obj of responses) {
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value === "string" && value.length > MAX_PERSONA_FIELD_CHARS) {
+        throw new BadRequest(`persona.${key} is too long.`);
+      }
     }
   }
 
-  const question = optionalString(b.question, "question", MAX_QUESTION_CHARS) ?? "";
-  return { message, history, persona, question };
+  return { message, history, persona, variants };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,7 +218,7 @@ app.post(
       send({ type: "personas", personas });
       if (clientGone) return;
 
-      await analyzePersonaDataStream(personas, data.questionOrProductInfo || "", (delta) => {
+      await analyzePersonaDataStream(personas, data, (delta) => {
         send({ type: "report", delta });
       });
       send({ type: "done" });
@@ -226,7 +245,7 @@ app.post(
     }
 
     try {
-      const reply = await chatWithPersona(parsed.history, parsed.message, parsed.persona, parsed.question);
+      const reply = await chatWithPersona(parsed.history, parsed.message, parsed.persona, parsed.variants);
       res.json({ reply });
     } catch (error) {
       console.error("[chat]", error);

@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { DIVERSE_RANDOM, type ChatTurn, type CustomerData, type Persona } from "../src/lib/types";
+import { DIVERSE_RANDOM, type ChatTurn, type CustomerData, type Persona, type VariantResponse } from "../src/lib/types";
+import { VARIANT_LETTERS, variantCount, variantStats, variantTexts } from "../src/lib/variants";
 
 // Server-only module: the API key is read from the server's environment and
 // never reaches the browser bundle.
@@ -23,13 +24,49 @@ const REQUIRED_PERSONA_KEYS: ReadonlyArray<keyof Persona> = [
   'answerToQuestion', 'feedback', 'keywords',
 ];
 
+const REQUIRED_RESPONSE_KEYS: ReadonlyArray<keyof VariantResponse> = [
+  'sentimentScore', 'answerToQuestion', 'feedback', 'keywords',
+];
+
 /**
- * Validates a single raw AI-returned value as a complete, well-typed Persona.
+ * Validates the response fields shared by a persona and each of its
+ * A/B alternatives. The score is coerced and clamped to 0–100.
+ */
+function validateResponse(obj: Record<string, unknown>, where: string): VariantResponse {
+  for (const key of REQUIRED_RESPONSE_KEYS) {
+    if (obj[key] === null || obj[key] === undefined) {
+      throw new Error(`${where} is missing required field: "${key}".`);
+    }
+  }
+
+  const rawSentiment = Number(obj.sentimentScore);
+  if (isNaN(rawSentiment)) {
+    throw new Error(
+      `${where}: "sentimentScore" must be numeric, received "${obj.sentimentScore}".`
+    );
+  }
+
+  // Coerce keywords to string array; fall back to [] if the field is malformed
+  const keywords: string[] = Array.isArray(obj.keywords)
+    ? (obj.keywords as unknown[]).map(String)
+    : [];
+
+  return {
+    sentimentScore: Math.min(100, Math.max(0, Math.round(rawSentiment))),
+    answerToQuestion: String(obj.answerToQuestion),
+    feedback: String(obj.feedback),
+    keywords,
+  };
+}
+
+/**
+ * Validates a single raw AI-returned value as a complete, well-typed Persona
+ * with exactly `alternativeCount` A/B alternatives.
  * Throws a descriptive error if any required field is absent, null, or carries
  * an incompatible type. Numeric fields are coerced and clamped to their
  * expected ranges so downstream rendering never receives NaN or out-of-range values.
  */
-export function validatePersona(raw: unknown, index: number): Persona {
+export function validatePersona(raw: unknown, index: number, alternativeCount = 0): Persona {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error(`Persona at index ${index} is not a valid object.`);
   }
@@ -44,13 +81,6 @@ export function validatePersona(raw: unknown, index: number): Persona {
     }
   }
 
-  const rawSentiment = Number(obj.sentimentScore);
-  if (isNaN(rawSentiment)) {
-    throw new Error(
-      `Persona at index ${index}: "sentimentScore" must be numeric, received "${obj.sentimentScore}".`
-    );
-  }
-
   const rawAge = Number(obj.age);
   if (isNaN(rawAge)) {
     throw new Error(
@@ -58,12 +88,7 @@ export function validatePersona(raw: unknown, index: number): Persona {
     );
   }
 
-  // Coerce keywords to string array; fall back to [] if the field is malformed
-  const keywords: string[] = Array.isArray(obj.keywords)
-    ? (obj.keywords as unknown[]).map(String)
-    : [];
-
-  return {
+  const persona: Persona = {
     id: Number(obj.id),
     name: String(obj.name),
     age: rawAge,
@@ -71,40 +96,73 @@ export function validatePersona(raw: unknown, index: number): Persona {
     habits: String(obj.habits),
     location: String(obj.location),
     incomeLevel: String(obj.incomeLevel),
-    sentimentScore: Math.min(100, Math.max(0, Math.round(rawSentiment))),
     background: String(obj.background),
-    answerToQuestion: String(obj.answerToQuestion),
-    feedback: String(obj.feedback),
-    keywords,
+    ...validateResponse(obj, `Persona at index ${index}`),
   };
+
+  if (alternativeCount > 0) {
+    const alternatives = obj.alternatives;
+    if (!Array.isArray(alternatives) || alternatives.length !== alternativeCount) {
+      throw new Error(
+        `Persona at index ${index} must have exactly ${alternativeCount} variant response(s).`
+      );
+    }
+    persona.alternatives = alternatives.map((alt, i) => {
+      if (typeof alt !== 'object' || alt === null) {
+        throw new Error(`Persona at index ${index}: variant ${VARIANT_LETTERS[i + 1]} is not a valid object.`);
+      }
+      return validateResponse(alt as Record<string, unknown>, `Persona at index ${index}, variant ${VARIANT_LETTERS[i + 1]}`);
+    });
+  }
+
+  return persona;
 }
 
-const personaResponseSchema = {
-  type: Type.ARRAY,
-  description: "List of exactly 10 simulated focus group participant personas.",
-  items: {
-    type: Type.OBJECT,
-    required: [
-      "id", "name", "age", "gender", "habits", "location",
-      "incomeLevel", "sentimentScore", "background",
-      "answerToQuestion", "feedback", "keywords"
-    ],
-    properties: {
-      id:               { type: Type.INTEGER, description: "Random 5-digit id." },
-      name:             { type: Type.STRING,  description: "Realistic fictional first name and last initial." },
-      age:              { type: Type.INTEGER, description: "Fictional age aligned with parameters." },
-      gender:           { type: Type.STRING,  description: "Fictional gender identity." },
-      habits:           { type: Type.STRING,  description: "Brief summary of lifestyle, routine, and habits." },
-      location:         { type: Type.STRING,  description: "City or region." },
-      incomeLevel:      { type: Type.STRING,  description: "Income bracket or job description." },
-      sentimentScore:   { type: Type.INTEGER, description: "Adoption likelihood 0-100 based STRICTLY on the persona's realistic circumstances (age, income, values, lifestyle) — NOT on their tone of speech or writing style. 0=fundamental impossibility (e.g. child asked about adult luxury, wrong demographic, unaffordable, core value conflict). 100=enthusiastic high-probability adopter. The answerToQuestion and feedback texts MUST be emotionally consistent with this score." },
-      background:       { type: Type.STRING,  description: "Individual background information and psychological persona profile." },
-      answerToQuestion: { type: Type.STRING,  description: "Their direct, personalized answer responding to the developer's specific Question / Product Info." },
-      feedback:         { type: Type.STRING,  description: "Unfiltered review or thought regarding the product and its pricing/value (MUST be approximately 20 words)." },
-      keywords:         { type: Type.ARRAY,   description: "Exactly 3 thematic tags summarizing their thoughts.", items: { type: Type.STRING } }
-    }
-  }
+const responseProperties = {
+  sentimentScore:   { type: Type.INTEGER, description: "Adoption likelihood 0-100 based STRICTLY on the persona's realistic circumstances (age, income, values, lifestyle) — NOT on their tone of speech or writing style. 0=fundamental impossibility (e.g. child asked about adult luxury, wrong demographic, unaffordable, core value conflict). 100=enthusiastic high-probability adopter. The answerToQuestion and feedback texts MUST be emotionally consistent with this score." },
+  answerToQuestion: { type: Type.STRING,  description: "Their direct, personalized answer responding to the developer's specific Question / Product Info." },
+  feedback:         { type: Type.STRING,  description: "Unfiltered review or thought regarding the product and its pricing/value (MUST be approximately 20 words)." },
+  keywords:         { type: Type.ARRAY,   description: "Exactly 3 thematic tags summarizing their thoughts.", items: { type: Type.STRING } },
 };
+
+function personaResponseSchema(alternativeCount: number) {
+  const required = [
+    "id", "name", "age", "gender", "habits", "location",
+    "incomeLevel", "background", ...Object.keys(responseProperties),
+  ];
+  const properties: Record<string, unknown> = {
+    id:               { type: Type.INTEGER, description: "Random 5-digit id." },
+    name:             { type: Type.STRING,  description: "Realistic fictional first name and last initial." },
+    age:              { type: Type.INTEGER, description: "Fictional age aligned with parameters." },
+    gender:           { type: Type.STRING,  description: "Fictional gender identity." },
+    habits:           { type: Type.STRING,  description: "Brief summary of lifestyle, routine, and habits." },
+    location:         { type: Type.STRING,  description: "City or region." },
+    incomeLevel:      { type: Type.STRING,  description: "Income bracket or job description." },
+    background:       { type: Type.STRING,  description: "Individual background information and psychological persona profile." },
+    ...responseProperties,
+  };
+
+  if (alternativeCount > 0) {
+    required.push("alternatives");
+    properties.alternatives = {
+      type: Type.ARRAY,
+      description: `This same persona's independent reaction to each A/B variant after Variant A, in order (${VARIANT_LETTERS.slice(1, alternativeCount + 1).join(", ")}). The top-level score/answer/feedback/keywords are the reaction to Variant A.`,
+      minItems: String(alternativeCount),
+      maxItems: String(alternativeCount),
+      items: {
+        type: Type.OBJECT,
+        required: Object.keys(responseProperties),
+        properties: responseProperties,
+      },
+    };
+  }
+
+  return {
+    type: Type.ARRAY,
+    description: "List of exactly 10 simulated focus group participant personas.",
+    items: { type: Type.OBJECT, required, properties },
+  };
+}
 
 /**
  * Resolves a single demographic field for the prompt.
@@ -122,6 +180,35 @@ function resolveField(
   const trimmed = value?.trim();
   if (!trimmed || trimmed === DIVERSE_RANDOM) return diverseDirective;
   return trimmed;
+}
+
+/** Extra prompt section for A/B tests; empty when only one variant is given. */
+function buildAbTestBlock(data: CustomerData): string {
+  const variants = variantTexts(data);
+  if (variants.length < 2) return '';
+
+  const list = variants
+    .map((text, i) => `  VARIANT ${VARIANT_LETTERS[i]}: ${text}`)
+    .join('\n');
+  const altLetters = VARIANT_LETTERS.slice(1, variants.length).join(', ');
+
+  return `
+═══════════════════════════════════════════════════════════════════
+  A/B TEST — ${variants.length} VARIANTS SHOWN TO THE SAME PERSONAS
+═══════════════════════════════════════════════════════════════════
+${list}
+
+  • The QUESTION / PRODUCT INFO above is VARIANT A.
+  • Every persona sees EVERY variant. The top-level sentimentScore,
+    answerToQuestion, feedback and keywords are their reaction to VARIANT A.
+  • "alternatives" must contain their reaction to variant ${altLetters}, in that order.
+  • Score each variant INDEPENDENTLY with the same rubric below. The same
+    persona may love one variant and reject another — differences in price,
+    features, or messaging must move the score realistically. Do not copy
+    the Variant A score by default.
+  • Each variant's answerToQuestion should respond to THAT variant and may
+    compare it to the others where natural.
+`;
 }
 
 function buildPersonaPrompt(data: CustomerData): string {
@@ -194,7 +281,7 @@ ${wildcardBlock}
 - LOCATION                : ${resolvedLocation}
 - INCOME LEVEL            : ${resolvedIncome}
 - QUESTION / PRODUCT INFO : ${data.questionOrProductInfo || 'General product concept evaluation'}
-
+${buildAbTestBlock(data)}
 ═══════════════════════════════════════════════════════════════════
   SENTIMENTSCORE — MANDATORY CALIBRATION RULES
 ═══════════════════════════════════════════════════════════════════
@@ -330,13 +417,14 @@ CRITICAL — "answerToQuestion" field:
 // ─────────────────────────────────────────────────────────────────────────────
 export async function generatePersonaBatch(data: CustomerData): Promise<Persona[]> {
   const ai = getGemini();
+  const alternativeCount = data.alternativeVariants?.length ?? 0;
   const response = await ai.models.generateContent({
     model: "gemini-3.1-flash-lite",
     contents: buildPersonaPrompt(data),
     config: {
       temperature: 0.82,
       responseMimeType: "application/json",
-      responseSchema: personaResponseSchema,
+      responseSchema: personaResponseSchema(alternativeCount),
       thinkingConfig: { thinkingBudget: 1024 }, // ✅ Light thinking ON — reasoning budget needed for score-to-circumstance alignment
     },
   });
@@ -360,7 +448,7 @@ export async function generatePersonaBatch(data: CustomerData): Promise<Persona[
   }
 
   // Validate every persona — throws immediately on the first structural problem
-  return parsed.map((item, index) => validatePersona(item, index));
+  return parsed.map((item, index) => validatePersona(item, index, alternativeCount));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -370,15 +458,31 @@ export async function generatePersonaBatch(data: CustomerData): Promise<Persona[
 // ─────────────────────────────────────────────────────────────────────────────
 export async function analyzePersonaDataStream(
   personas: Persona[],
-  question: string,
+  data: CustomerData,
   onChunk: (delta: string) => void
 ): Promise<string> {
   const ai = getGemini();
+  const question = data.questionOrProductInfo ?? "";
+  const variants = variantTexts(data).slice(0, variantCount(personas));
+  const isAbTest = variants.length > 1;
+
+  // Pre-computed so the model reports the real numbers instead of estimating them
+  const abTestSection = isAbTest
+    ? `
+## 5. A/B Variant Comparison & Recommendation
+The same personas evaluated ${variants.length} variants:
+${variants.map((text, i) => {
+  const s = variantStats(personas, i);
+  return `- VARIANT ${VARIANT_LETTERS[i]}: "${text}" — average score ${s.average}/100, median ${s.median}, likely adopters (score ≥ 65) ${s.adopters}/${s.total}, rejecters (score < 31) ${s.rejecters}/${s.total}`;
+}).join("\n")}
+Use exactly these figures. Name the winning variant (or state clearly if the result is too close to call), explain WHICH personas switched their reaction between variants and WHY, and recommend what to test next. In sections 2 and 3, the per-persona answers refer to Variant A; each persona's "alternatives" array holds their reactions to Variant ${VARIANT_LETTERS.slice(1, variants.length).join(", ")}.
+`
+    : "";
 
   const prompt = `You are MarketMind, a preeminent AI marketing strategist and consumer psychologist.
 We have successfully simulated empirical focus group interviews with a cohort of ${personas.length} unique consumer personas.
 
-Based on the empirical simulation data below, compile a comprehensive and rigorous strategic report structured EXACTLY into these 4 sections:
+Based on the empirical simulation data below, compile a comprehensive and rigorous strategic report structured EXACTLY into these ${isAbTest ? 5 : 4} sections:
 
 ## 1. Fictional Focus Group Profiles & Backgrounds
 Describe the background/lifestyle of each of the 10 personas based on the simulation metadata. Offer distinct profiles for readers to understand their lives.
@@ -391,7 +495,7 @@ Deliver a breakdown of each persona's direct response/enthusiasm towards the ove
 
 ## 4. Aggregate Macro-Level Synthesis & Recommendations
 Provide an in-depth, expert strategic evaluation synthesizing all 10 responses. Highlight patterns, segment motivations, and outline actionable pivots for positioning, pricing, and adoption.
-
+${abTestSection}
 Here is the raw dataset from the simulated focus group:
 ${JSON.stringify(personas)}
 `;
@@ -425,7 +529,7 @@ export async function chatWithPersona(
   history: ChatTurn[],
   newMessage: string,
   persona: Persona,
-  question: string
+  variants: string[]
 ): Promise<string> {
   const ai = getGemini();
 
@@ -435,12 +539,21 @@ export async function chatWithPersona(
   }));
   contents.push({ role: "user", parts: [{ text: newMessage }] });
 
+  const question = variants[0] ?? "";
+  const alternativesContext = (persona.alternatives ?? [])
+    .map((alt, i) => {
+      const letter = VARIANT_LETTERS[i + 1];
+      return `You were also shown VARIANT ${letter} ("${variants[i + 1] ?? ""}"). Your adoption likelihood for it was ${alt.sentimentScore}/100. Your answer: ${alt.answerToQuestion} Your feedback: ${alt.feedback}`;
+    })
+    .join("\n");
+
   const systemInstruction = `You are roleplaying as simulated retail consumer "${persona.name}" (Age: ${persona.age}, Gender: ${persona.gender}, Location: ${persona.location}).
 Your Habits/Lifestyle: ${persona.habits}
 Your Income Level/Job: ${persona.incomeLevel}
 Your Profile Background: ${persona.background}
 Your Feedback on the Overarching Product: ${persona.feedback}
-Your initial answer to the developer's question/product proposal ("${question}"): ${persona.answerToQuestion}
+Your initial answer to the developer's question/product proposal${alternativesContext ? " (VARIANT A)" : ""} ("${question}"): ${persona.answerToQuestion}
+${alternativesContext}
 
 CRITICAL RULES:
 1. Speak in the first person ("I", "my") and communicate as this realistic everyday person.

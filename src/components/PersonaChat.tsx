@@ -3,46 +3,49 @@ import { Send, UserCheck, Bot, User, Loader2, MessageCircle, Info } from 'lucide
 import Markdown from 'react-markdown';
 import { cn } from '../lib/utils';
 import { sendChatMessage } from '../lib/api';
-import type { Persona } from '../lib/types';
+import type { ChatTurn, Persona } from '../lib/types';
+import { VARIANT_LETTERS } from '../lib/variants';
 
-export interface ChatMessage {
-  role: 'user' | 'model';
-  text: string;
-}
+export type ChatMessage = ChatTurn;
 
 interface PersonaChatProps {
-  initialInsights: string | null;
   personas: Persona[];
-  question: string;
+  /** Variant texts [A, B, C…] the personas answered. */
+  variants: string[];
+  /** Transcripts keyed by persona index (owned by App so they can be saved). */
+  chats: Record<number, ChatMessage[]>;
+  onUpdateChat: (personaIdx: number, update: (messages: ChatMessage[]) => ChatMessage[]) => void;
 }
 
-export function PersonaChat({ initialInsights, personas, question }: PersonaChatProps) {
+function greetingFor(persona: Persona, variants: string[]): ChatMessage {
+  const question = variants[0] || "your product concept";
+  const others = (persona.alternatives ?? [])
+    .map((alt, i) => `Variant ${VARIANT_LETTERS[i + 1]}: ${alt.sentimentScore}/100`)
+    .join(', ');
+  return {
+    role: 'model',
+    text: `Hi there! I'm ${persona.name} (${persona.age} y/o from ${persona.location}). I participated in your focus group. \n\nIn response to your query "${question}", I felt:\n*"${persona.answerToQuestion}"*\n\nI'm ready! Chat with me to learn more about my background, routine, motivations, or why I gave a sentiment score of ${persona.sentimentScore}/100${others ? ` (and ${others})` : ''}.`
+  };
+}
+
+export function PersonaChat({ personas, variants, chats, onUpdateChat }: PersonaChatProps) {
   const [selectedIdx, setSelectedIdx] = useState<number>(0);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activePersona: Persona | undefined = personas[selectedIdx];
 
-  // Reinitialize chat greeting whenever active persona changes
+  // Saved transcript for this persona, or a fresh greeting
+  const saved = chats[selectedIdx];
+  const messages: ChatMessage[] = saved?.length
+    ? saved
+    : activePersona ? [greetingFor(activePersona, variants)] : [];
+
+  // Reset the selection when a different run with fewer personas is loaded
   useEffect(() => {
-    if (activePersona) {
-      setMessages([
-        {
-          role: 'model',
-          text: `Hi there! I'm ${activePersona.name} (${activePersona.age} y/o from ${activePersona.location}). I participated in your focus group. \n\nIn response to your query "${question || "your product concept"}", I felt:\n*"${activePersona.answerToQuestion}"*\n\nI'm ready! Chat with me to learn more about my background, routine, motivations, or why I gave a sentiment score of ${activePersona.sentimentScore}/100.`
-        }
-      ]);
-    } else {
-      setMessages([
-        {
-          role: 'model',
-          text: "Welcome to the 1-on-1 Interview System. Please run your simulation on the 'Data Input' tab first to generate simulated consumers, and then select a participant here to start a deeper interview."
-        }
-      ]);
-    }
-  }, [selectedIdx, personas.length, activePersona, question]);
+    if (selectedIdx >= personas.length) setSelectedIdx(0);
+  }, [personas.length, selectedIdx]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -59,12 +62,15 @@ export function PersonaChat({ initialInsights, personas, question }: PersonaChat
     const userMsg = input.trim();
     setInput('');
 
+    // Captured so a reply still lands in the right transcript if the user switches persona
+    const idx = selectedIdx;
+    const persona = activePersona;
     const newMessages: ChatMessage[] = [
       ...messages,
       { role: 'user', text: userMsg }
     ];
 
-    setMessages(newMessages);
+    onUpdateChat(idx, () => newMessages);
     setIsTyping(true);
 
     try {
@@ -72,9 +78,9 @@ export function PersonaChat({ initialInsights, personas, question }: PersonaChat
       // This replaces the original pop()! pattern and removes the non-null assertion risk.
       const chatHistory = newMessages.slice(0, -1);
 
-      const aiResponse = await sendChatMessage(chatHistory, userMsg, activePersona, question);
+      const aiResponse = await sendChatMessage(chatHistory, userMsg, persona, variants);
 
-      setMessages(prev => [
+      onUpdateChat(idx, prev => [
         ...prev,
         // chatWithPersona guarantees a string, but we add a fallback message as a
         // final safety net in case an empty string slips through.
@@ -85,11 +91,11 @@ export function PersonaChat({ initialInsights, personas, question }: PersonaChat
       ]);
     } catch (error) {
       console.error(error);
-      setMessages(prev => [
+      onUpdateChat(idx, prev => [
         ...prev,
         {
           role: 'model',
-          text: `**Error**: ${error instanceof Error ? error.message : `Connection to ${activePersona.name} was lost.`}`
+          text: `**Error**: ${error instanceof Error ? error.message : `Connection to ${persona.name} was lost.`}`
         }
       ]);
     } finally {

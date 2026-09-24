@@ -1,15 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import Markdown from 'react-markdown';
 import {
   Sparkle, RefreshCw, Users, Activity, HelpCircle,
-  HeartHandshake, LayoutGrid, FileText, AlertTriangle, Loader2
+  HeartHandshake, LayoutGrid, FileText, AlertTriangle, Loader2, BarChart3
 } from 'lucide-react';
 import type { Persona } from '../lib/types';
+import { ADOPTER_THRESHOLD, VARIANT_COLORS, VARIANT_LETTERS, responseFor, variantStats } from '../lib/variants';
+import { VariantSummary } from './VariantSummary';
+
+// recharts is large; only download it when the Charts tab is opened
+const SentimentCharts = lazy(() => import('./SentimentCharts'));
 
 interface InsightsViewerProps {
   insights: string | null;
   streamingReport: string;
   personas: Persona[];
+  /** Variant texts [A, B, C…] the personas answered. */
+  variants: string[];
   progressMsg: string;
   errorMsg?: string | null;
   onRegenerate: () => void;
@@ -20,12 +27,16 @@ export function InsightsViewer({
   insights,
   streamingReport,
   personas,
+  variants,
   progressMsg,
   errorMsg,
   onRegenerate,
   isLoading,
 }: InsightsViewerProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'roster' | 'report'>('roster');
+  const [activeSubTab, setActiveSubTab] = useState<'roster' | 'charts' | 'report'>('roster');
+  const [variantChoice, setVariantChoice] = useState(0);
+  const isAbTest = variants.length > 1;
+  const selectedVariant = variantChoice < variants.length ? variantChoice : 0;
 
   // Auto-switch to report tab once streaming starts
   const hasStartedStreaming = streamingReport.length > 0;
@@ -96,11 +107,7 @@ export function InsightsViewer({
   }
 
   // ── Compute KPI metrics ────────────────────────────────────────────────────
-  const avgSentiment = personas.length > 0
-    ? Math.round(personas.reduce((acc, p) => acc + p.sentimentScore, 0) / personas.length)
-    : 0;
-  const highSentimentCount = personas.filter(p => p.sentimentScore >= 75).length;
-  const criticalCount = personas.filter(p => p.sentimentScore < 50).length;
+  const stats = variantStats(personas, selectedVariant);
 
   const getSentimentColor = (score: number) => {
     if (score >= 75) return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20';
@@ -117,7 +124,11 @@ export function InsightsViewer({
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in duration-300">
 
       {/* KPI Bento Grid — appears as soon as personas arrive */}
-      {personas.length > 0 && (
+      {personas.length > 0 && isAbTest && (
+        <VariantSummary personas={personas} variants={variants} />
+      )}
+
+      {personas.length > 0 && !isAbTest && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-[#0B0F19] p-5 rounded-2xl border border-slate-800/80 flex items-center gap-4 bg-gradient-to-tr from-white/[0.015] to-transparent">
             <div className="p-3 bg-blue-500/15 text-blue-400 rounded-xl border border-blue-500/10">
@@ -135,7 +146,7 @@ export function InsightsViewer({
             </div>
             <div>
               <p className="text-xs font-semibold text-slate-450 tracking-wide uppercase">Avg. Sentiment Score</p>
-              <p className="text-2xl font-bold text-slate-100">{avgSentiment} / 100</p>
+              <p className="text-2xl font-bold text-slate-100">{stats.average} / 100</p>
             </div>
           </div>
 
@@ -144,18 +155,19 @@ export function InsightsViewer({
               <HeartHandshake className="w-5 h-5" />
             </div>
             <div>
-              <p className="text-xs font-semibold text-slate-450 tracking-wide uppercase">Direct Reception</p>
+              <p className="text-xs font-semibold text-slate-450 tracking-wide uppercase">Likely Adopters</p>
               <p className="text-2xl font-bold text-slate-100">
-                {highSentimentCount} Warm • {criticalCount} Skeptic
+                {stats.adopters} of {stats.total}
               </p>
+              <p className="text-[11px] text-slate-500">score {ADOPTER_THRESHOLD}+</p>
             </div>
           </div>
         </div>
       )}
 
       {/* Sub-tab selectors */}
-      <div className="flex border-b border-slate-800 justify-between items-center pb-2">
-        <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2 border-b border-slate-800 justify-between items-center pb-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => setActiveSubTab('roster')}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
@@ -169,6 +181,19 @@ export function InsightsViewer({
           </button>
 
           <button
+            onClick={() => setActiveSubTab('charts')}
+            disabled={personas.length === 0}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+              activeSubTab === 'charts'
+                ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            2. Charts
+          </button>
+
+          <button
             onClick={() => setActiveSubTab('report')}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
               activeSubTab === 'report'
@@ -177,7 +202,7 @@ export function InsightsViewer({
             }`}
           >
             <FileText className="w-4 h-4" />
-            2. Macro-level report
+            3. Macro-level report
             {/* Live streaming badge */}
             {isStreamingNow && (
               <span className="flex items-center gap-1 ml-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-1.5 py-0.5 rounded-full animate-pulse">
@@ -198,8 +223,46 @@ export function InsightsViewer({
         </button>
       </div>
 
+      {/* Variant picker: which variant the roster and keyword chart show */}
+      {isAbTest && activeSubTab !== 'report' && (
+        <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-label="Variant shown">
+          <span className="text-xs text-slate-500 mr-1">Showing reactions to</span>
+          {variants.map((text, i) => (
+            <button
+              key={i}
+              role="radio"
+              aria-checked={selectedVariant === i}
+              onClick={() => setVariantChoice(i)}
+              title={text}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                selectedVariant === i
+                  ? 'bg-slate-800 text-slate-100 border-slate-600'
+                  : 'text-slate-400 border-slate-800 hover:text-slate-200'
+              }`}
+            >
+              <span className="w-2 h-2 rounded-sm" style={{ background: VARIANT_COLORS[i] }} />
+              Variant {VARIANT_LETTERS[i]}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── CHARTS TAB ────────────────────────────────────────────────────── */}
+      {activeSubTab === 'charts' && personas.length > 0 && (
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center gap-3 py-16 text-slate-500">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span className="text-sm">Loading charts...</span>
+            </div>
+          }
+        >
+          <SentimentCharts personas={personas} variants={variants} selectedVariant={selectedVariant} />
+        </Suspense>
+      )}
+
       {/* ── ROSTER TAB ────────────────────────────────────────────────────── */}
-      {activeSubTab === 'roster' ? (
+      {activeSubTab === 'charts' ? null : activeSubTab === 'roster' ? (
         <div className="space-y-6">
           <div className="flex items-center gap-2 pb-1">
             <Sparkle className="w-4 h-4 text-blue-400" />
@@ -215,7 +278,9 @@ export function InsightsViewer({
             </div>
           )}
 
-          {personas.map((persona, idx) => (
+          {personas.map((persona, idx) => {
+            const response = responseFor(persona, selectedVariant);
+            return (
             <div
               key={persona.id || idx}
               className="bg-[#0B0F19] rounded-2xl border border-slate-850 bg-gradient-to-b from-white/[0.012] to-transparent p-6 space-y-5 shadow-md flex flex-col justify-between"
@@ -237,8 +302,20 @@ export function InsightsViewer({
                   </div>
                 </div>
 
-                <div className={`self-start sm:self-center px-3 py-1 rounded-full text-xs font-bold border ${getSentimentColor(persona.sentimentScore)}`}>
-                  Enthusiasm Score: {persona.sentimentScore}/100
+                <div className="self-start sm:self-center flex flex-col items-start sm:items-end gap-1.5">
+                  <div className={`px-3 py-1 rounded-full text-xs font-bold border ${getSentimentColor(response.sentimentScore)}`}>
+                    {isAbTest ? `Variant ${VARIANT_LETTERS[selectedVariant]} · ` : ''}Enthusiasm Score: {response.sentimentScore}/100
+                  </div>
+                  {isAbTest && (
+                    <div className="flex gap-2 text-[11px] text-slate-400">
+                      {variants.map((_, v) => (
+                        <span key={v} className="flex items-center gap-1 tabular-nums">
+                          <span className="w-1.5 h-1.5 rounded-sm" style={{ background: VARIANT_COLORS[v] }} />
+                          {VARIANT_LETTERS[v]} {responseFor(persona, v).sentimentScore}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -255,14 +332,14 @@ export function InsightsViewer({
                     <HelpCircle className="w-3.5 h-3.5" />
                     2. Answer to Specific Question
                   </span>
-                  <p className="text-slate-300 italic leading-relaxed">"{persona.answerToQuestion}"</p>
+                  <p className="text-slate-300 italic leading-relaxed">"{response.answerToQuestion}"</p>
                 </div>
 
                 <div className="space-y-1.5 p-4 rounded-xl bg-slate-950/40 border border-slate-850">
                   <span className="text-xs uppercase tracking-wider text-indigo-400 font-semibold block">3. Concept Resonance Feedback</span>
-                  <p className="text-slate-300 leading-relaxed">"{persona.feedback}"</p>
+                  <p className="text-slate-300 leading-relaxed">"{response.feedback}"</p>
                   <div className="flex flex-wrap gap-1 mt-3">
-                    {persona.keywords?.map((tag, tIdx) => (
+                    {response.keywords?.map((tag, tIdx) => (
                       <span key={tIdx} className="text-[10px] bg-slate-900 text-slate-450 px-2 py-0.5 rounded border border-slate-800/80">
                         #{tag}
                       </span>
@@ -271,7 +348,8 @@ export function InsightsViewer({
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
 
       ) : (
