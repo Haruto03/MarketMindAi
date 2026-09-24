@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Sparkles, Users, Compass, MapPin, DollarSign, HelpCircle, UserCheck, AlertCircle } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { type CustomerData, DIVERSE_RANDOM } from '../lib/gemini';
+import { type CustomerData, DIVERSE_RANDOM } from '../lib/types';
 
 interface CustomerFormProps {
   initialData: CustomerData;

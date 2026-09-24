@@ -4,7 +4,8 @@ import { cn } from './lib/utils';
 import { CustomerForm } from './components/CustomerForm';
 import { InsightsViewer } from './components/InsightsViewer';
 import { PersonaChat } from './components/PersonaChat';
-import { generatePersonaBatch, analyzePersonaDataStream, type Persona, type CustomerData } from './lib/gemini';
+import { runSimulation } from './lib/api';
+import type { Persona, CustomerData } from './lib/types';
 
 type Tab = 'data' | 'insights' | 'chat';
 
@@ -45,30 +46,26 @@ export default function App() {
     setActiveTab('insights');
 
     try {
-      // ─── STEP 1: Generate 10 personas (thinking OFF, fast JSON generation) ───
+      // The server generates the 10 personas, then streams the strategic report.
+      // Each streamed chunk goes into streamingReport so the UI renders live.
       setProgressMsg("⚡ Step 1/2 — Recruiting 10 AI consumer agents...");
-      const focusGroupPersonas = await generatePersonaBatch(data);
-      setPersonas(focusGroupPersonas);
-
-      // ─── STEP 2: Stream the strategic report immediately after personas arrive ───
-      //   thinkingBudget: 1024 keeps light reasoning for macro synthesis quality.
-      //   We feed each streamed chunk into streamingReport so the UI renders live.
-      setProgressMsg("📝 Step 2/2 — Streaming macro-level strategic report...");
       let accumulated = "";
-      const finalText = await analyzePersonaDataStream(
-        focusGroupPersonas,
-        data.questionOrProductInfo || "",
-        (delta) => {
+      const finalText = await runSimulation(data, {
+        onPersonas: (focusGroupPersonas) => {
+          setPersonas(focusGroupPersonas);
+          setProgressMsg("📝 Step 2/2 — Streaming macro-level strategic report...");
+        },
+        onReportChunk: (delta) => {
           accumulated += delta;
           setStreamingReport(accumulated);
-        }
-      );
+        },
+      });
       setInsights(finalText);
       setStreamingReport("");
 
     } catch (error: any) {
       console.error(error);
-      setErrorMsg(error.message || 'An unexpected error occurred during the simulation. Please check your API key or network connection.');
+      setErrorMsg(error.message || 'An unexpected error occurred during the simulation. Please check your network connection.');
     } finally {
       setIsGenerating(false);
       setProgressMsg("");

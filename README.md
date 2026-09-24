@@ -27,9 +27,28 @@ Built by Haruto Iriyama with React, TypeScript, Vite and Tailwind CSS.
    history and answers in character, grounded in that persona's profile and
    original feedback.
 
+## Architecture
+
+The browser never talks to Gemini directly. A small Express server
+(`server/`) holds the API key, calls Gemini, and exposes two endpoints:
+
+- `POST /api/simulate` — generates the personas and streams the report back
+  as newline-delimited JSON, in a single request.
+- `POST /api/chat` — one in-character interview reply.
+
+The server validates and size-limits every request, and rate-limits usage
+per IP (simulations and chat messages per hour) plus a server-wide daily
+cap, so a public deployment can't run up an unbounded Gemini bill. Limits are
+configurable through environment variables — see [.env.example](.env.example).
+
 ## Project layout
 
 ```
+server/
+├── index.ts                   Express API, validation, rate limits; serves
+│                              the app (Vite middleware in dev, dist/ in prod)
+└── gemini.ts                  prompt building, structured output schema,
+                               streaming report, in-character chat
 src/
 ├── App.tsx                    tab shell (Configuration / Results / Interviews)
 ├── components/
@@ -37,8 +56,8 @@ src/
 │   ├── InsightsViewer.tsx     persona cards + streaming executive report
 │   └── PersonaChat.tsx        1-on-1 chat with a persona
 └── lib/
-    ├── gemini.ts              prompt building, structured output schema,
-    │                          streaming report, in-character chat
+    ├── api.ts                 browser client for the API server
+    ├── types.ts               types shared by browser and server
     └── utils.ts
 ```
 
@@ -51,10 +70,9 @@ Requires Node.js 18+ and a Gemini API key from
 npm install
 ```
 
-Create a `.env` file in the project root:
+Copy `.env.example` to `.env` and set your key:
 
 ```text
-VITE_GEMINI_API_KEY=your_api_key
 GEMINI_API_KEY=your_api_key
 ```
 
@@ -64,8 +82,18 @@ Then:
 npm run dev
 ```
 
-and open <http://localhost:3000>. `npm run build` produces a static bundle
-in `dist/`; `npm run lint` type-checks.
+and open <http://localhost:3000>. `npm run lint` type-checks.
+
+## Production
+
+```bash
+npm run build   # client bundle in dist/, server bundle in build/server.js
+npm start       # serves the app and API on $PORT (default 3000)
+```
+
+Set `GEMINI_API_KEY` in the host's environment rather than committing a
+`.env` file, and set `TRUST_PROXY=1` when running behind a reverse proxy
+(Cloud Run, Render, Railway, Nginx…) so rate limits apply per real client IP.
 
 See [SETUP_GUIDE.md](SETUP_GUIDE.md) for a step-by-step walkthrough aimed at
 non-developers.

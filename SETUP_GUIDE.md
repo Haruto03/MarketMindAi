@@ -42,9 +42,10 @@ This application uses Google's latest AI model to power the simulation. You can 
 
 ```text
 # Replace the placeholder text with your actual API key
-VITE_GEMINI_API_KEY=your_actual_api_key_here
 GEMINI_API_KEY=your_actual_api_key_here
 ```
+
+   *(The key stays on your computer: only the local MarketMind server reads it — it is never sent to the browser.)*
 
 ---
 

@@ -4,7 +4,7 @@ import {
   Sparkle, RefreshCw, Users, Activity, HelpCircle,
   HeartHandshake, LayoutGrid, FileText, AlertTriangle, Loader2
 } from 'lucide-react';
-import { type Persona } from '../lib/gemini';
+import type { Persona } from '../lib/types';
 
 interface InsightsViewerProps {
   insights: string | null;

@@ -1,73 +1,20 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { DIVERSE_RANDOM, type ChatTurn, type CustomerData, type Persona } from "../src/lib/types";
 
+// Server-only module: the API key is read from the server's environment and
+// never reaches the browser bundle.
 let aiClient: GoogleGenAI | null = null;
 
 export function getGemini() {
   if (!aiClient) {
-    // Resolve the key from both possible sources so we can inspect each independently
-    const viteKey  = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
-    const nodeKey  = process.env.GEMINI_API_KEY          as string | undefined;
-    const key      = viteKey ?? nodeKey;
-
+    const key = process.env.GEMINI_API_KEY;
     if (!key) {
       throw new Error("GEMINI_API_KEY environment variable is required");
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // 🔍 DEBUG BLOCK — Safe key verification.
-    //    Shows only the first 5 characters and total length; never the full key.
-    //    ⚠️  Remove this entire block before shipping to production.
-    // ─────────────────────────────────────────────────────────────────────────
-    const activeSource = viteKey
-      ? "import.meta.env.VITE_GEMINI_API_KEY"
-      : "process.env.GEMINI_API_KEY";
-    const keyPreview   = `${key.slice(0, 5)}...`;
-
-    console.group("%c[MarketMind Debug] API Key Diagnostics", "color:#4ade80;font-weight:bold;background:#0f172a;padding:3px 8px;border-radius:4px;");
-    console.log(`Active Source : ${activeSource}`);
-    console.log(`Key Preview   : ${keyPreview}  (Length: ${key.length})`);
-    console.log(`VITE key set? : ${viteKey  !== undefined ? "✅ YES" : "❌ NO  ← likely cause of quota bug"}`);
-    console.log(`NODE key set? : ${nodeKey  !== undefined ? "✅ YES" : "❌ NO"}`);
-    console.groupEnd();
-    // ─────────────────────────────────────────────────────────────────────────
-    // 🔍 END DEBUG BLOCK
-    // ─────────────────────────────────────────────────────────────────────────
-
     aiClient = new GoogleGenAI({ apiKey: key });
   }
   return aiClient;
 }
-
-export interface Persona {
-  id: number;
-  name: string;
-  age: number;
-  gender: string;
-  habits: string;
-  location: string;
-  incomeLevel: string;
-  sentimentScore: number;
-  background: string;
-  answerToQuestion: string;
-  feedback: string;
-  keywords: string[];
-}
-
-export interface CustomerData {
-  ageRange?: string;
-  gender?: string;
-  habits?: string;
-  location?: string;
-  incomeLevel?: string;
-  questionOrProductInfo?: string;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Sentinel value used by CustomerForm when a demographic field is left blank.
-// When buildPersonaPrompt detects this value it tells Gemini to maximise
-// diversity for that dimension across all 10 personas.
-// ─────────────────────────────────────────────────────────────────────────────
-export const DIVERSE_RANDOM = "DIVERSE_RANDOM" as const;
 
 // All field names that must be present on every AI-generated Persona object
 const REQUIRED_PERSONA_KEYS: ReadonlyArray<keyof Persona> = [
@@ -82,7 +29,7 @@ const REQUIRED_PERSONA_KEYS: ReadonlyArray<keyof Persona> = [
  * an incompatible type. Numeric fields are coerced and clamped to their
  * expected ranges so downstream rendering never receives NaN or out-of-range values.
  */
-function validatePersona(raw: unknown, index: number): Persona {
+export function validatePersona(raw: unknown, index: number): Persona {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error(`Persona at index ${index} is not a valid object.`);
   }
@@ -475,7 +422,7 @@ ${JSON.stringify(personas)}
 // Return type is explicitly Promise<string>; callers never need a null-guard.
 // ─────────────────────────────────────────────────────────────────────────────
 export async function chatWithPersona(
-  history: { role: "user" | "model"; text: string }[],
+  history: ChatTurn[],
   newMessage: string,
   persona: Persona,
   question: string

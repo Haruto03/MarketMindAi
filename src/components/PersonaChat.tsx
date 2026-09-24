@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, UserCheck, Bot, User, Loader2, MessageCircle, Info } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { cn } from '../lib/utils';
-import { chatWithPersona, type Persona } from '../lib/gemini';
+import { sendChatMessage } from '../lib/api';
+import type { Persona } from '../lib/types';
 
 export interface ChatMessage {
   role: 'user' | 'model';
@@ -71,7 +72,7 @@ export function PersonaChat({ initialInsights, personas, question }: PersonaChat
       // This replaces the original pop()! pattern and removes the non-null assertion risk.
       const chatHistory = newMessages.slice(0, -1);
 
-      const aiResponse = await chatWithPersona(chatHistory, userMsg, activePersona, question);
+      const aiResponse = await sendChatMessage(chatHistory, userMsg, activePersona, question);
 
       setMessages(prev => [
         ...prev,
@@ -88,7 +89,7 @@ export function PersonaChat({ initialInsights, personas, question }: PersonaChat
         ...prev,
         {
           role: 'model',
-          text: `**Error**: Connection to ${activePersona.name}'s cognitive avatar was lost. Please verify your GEMINI_API_KEY.`
+          text: `**Error**: ${error instanceof Error ? error.message : `Connection to ${activePersona.name} was lost.`}`
         }
       ]);
     } finally {
