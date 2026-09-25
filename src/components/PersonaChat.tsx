@@ -3,8 +3,8 @@ import { Send, UserCheck, Bot, User, Loader2, MessageCircle, Info } from 'lucide
 import Markdown from 'react-markdown';
 import { cn } from '../lib/utils';
 import { sendChatMessage } from '../lib/api';
+import { greetingFor } from '../lib/personas';
 import type { ChatTurn, Persona } from '../lib/types';
-import { VARIANT_LETTERS } from '../lib/variants';
 
 export type ChatMessage = ChatTurn;
 
@@ -12,40 +12,40 @@ interface PersonaChatProps {
   personas: Persona[];
   /** Variant texts [A, B, C…] the personas answered. */
   variants: string[];
-  /** Transcripts keyed by persona index (owned by App so they can be saved). */
+  /** Saved transcripts keyed by persona index. */
   chats: Record<number, ChatMessage[]>;
-  onUpdateChat: (personaIdx: number, update: (messages: ChatMessage[]) => ChatMessage[]) => void;
+  /** The saved run being interviewed; null while a simulation is still running. */
+  runId: string | null;
+  /** Called with the full transcript the server saved after each reply. */
+  onTranscript: (personaIdx: number, messages: ChatMessage[]) => void;
 }
 
-function greetingFor(persona: Persona, variants: string[]): ChatMessage {
-  const question = variants[0] || "your product concept";
-  const others = (persona.alternatives ?? [])
-    .map((alt, i) => `Variant ${VARIANT_LETTERS[i + 1]}: ${alt.sentimentScore}/100`)
-    .join(', ');
-  return {
-    role: 'model',
-    text: `Hi there! I'm ${persona.name} (${persona.age} y/o from ${persona.location}). I participated in your focus group. \n\nIn response to your query "${question}", I felt:\n*"${persona.answerToQuestion}"*\n\nI'm ready! Chat with me to learn more about my background, routine, motivations, or why I gave a sentiment score of ${persona.sentimentScore}/100${others ? ` (and ${others})` : ''}.`
-  };
-}
-
-export function PersonaChat({ personas, variants, chats, onUpdateChat }: PersonaChatProps) {
+export function PersonaChat({ personas, variants, chats, runId, onTranscript }: PersonaChatProps) {
   const [selectedIdx, setSelectedIdx] = useState<number>(0);
   const [input, setInput] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
+  // The message being sent (shown immediately) and per-persona send errors
+  const [pending, setPending] = useState<{ idx: number; text: string } | null>(null);
+  const [errors, setErrors] = useState<Record<number, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activePersona: Persona | undefined = personas[selectedIdx];
+  const isTyping = pending !== null;
 
   // Saved transcript for this persona, or a fresh greeting
   const saved = chats[selectedIdx];
-  const messages: ChatMessage[] = saved?.length
-    ? saved
-    : activePersona ? [greetingFor(activePersona, variants)] : [];
+  const messages: ChatMessage[] = [
+    ...(saved?.length ? saved : activePersona ? [greetingFor(activePersona, variants)] : []),
+    ...(pending?.idx === selectedIdx ? [{ role: 'user' as const, text: pending.text }] : []),
+    ...(errors[selectedIdx] ? [{ role: 'model' as const, text: `**Error**: ${errors[selectedIdx]}` }] : []),
+  ];
 
   // Reset the selection when a different run with fewer personas is loaded
   useEffect(() => {
     if (selectedIdx >= personas.length) setSelectedIdx(0);
   }, [personas.length, selectedIdx]);
+
+  // Errors belong to the run they happened in
+  useEffect(() => { setErrors({}); }, [runId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -53,53 +53,31 @@ export function PersonaChat({ personas, variants, chats, onUpdateChat }: Persona
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, isTyping]);
+  }, [messages.length, isTyping, selectedIdx]);
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isTyping || !activePersona) return;
+    if (!input.trim() || isTyping || !activePersona || !runId) return;
 
     const userMsg = input.trim();
     setInput('');
 
     // Captured so a reply still lands in the right transcript if the user switches persona
     const idx = selectedIdx;
-    const persona = activePersona;
-    const newMessages: ChatMessage[] = [
-      ...messages,
-      { role: 'user', text: userMsg }
-    ];
-
-    onUpdateChat(idx, () => newMessages);
-    setIsTyping(true);
+    setErrors((prev) => { const { [idx]: _, ...rest } = prev; return rest; });
+    setPending({ idx, text: userMsg });
 
     try {
-      // Exclude the just-added user message from history — pass it separately as newMessage.
-      // This replaces the original pop()! pattern and removes the non-null assertion risk.
-      const chatHistory = newMessages.slice(0, -1);
-
-      const aiResponse = await sendChatMessage(chatHistory, userMsg, persona, variants);
-
-      onUpdateChat(idx, prev => [
-        ...prev,
-        // chatWithPersona guarantees a string, but we add a fallback message as a
-        // final safety net in case an empty string slips through.
-        {
-          role: 'model',
-          text: aiResponse || "I'm sorry, I couldn't form a response right now. Could you try asking again?"
-        }
-      ]);
+      onTranscript(idx, await sendChatMessage(runId, idx, userMsg));
     } catch (error) {
       console.error(error);
-      onUpdateChat(idx, prev => [
+      setErrors((prev) => ({
         ...prev,
-        {
-          role: 'model',
-          text: `**Error**: ${error instanceof Error ? error.message : `Connection to ${persona.name} was lost.`}`
-        }
-      ]);
+        [idx]: error instanceof Error ? error.message : `Connection to ${activePersona.name} was lost.`,
+      }));
+      setInput(userMsg); // let the user retry without retyping
     } finally {
-      setIsTyping(false);
+      setPending(null);
     }
   };
 
@@ -265,14 +243,14 @@ export function PersonaChat({ personas, variants, chats, onUpdateChat }: Persona
                   handleSend(e);
                 }
               }}
-              placeholder={activePersona ? `Ask ${activePersona.name}...` : "Select a persona..."}
-              disabled={!activePersona || isTyping}
+              placeholder={!runId ? "Interviews open once the report has finished..." : activePersona ? `Ask ${activePersona.name}...` : "Select a persona..."}
+              disabled={!activePersona || isTyping || !runId}
               className="w-full max-h-20 min-h-[36px] py-1.5 pl-3 pr-10 bg-slate-950 border border-slate-850 text-slate-100 placeholder:text-slate-600 rounded-lg focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed font-sans text-xs sm:text-sm leading-normal"
               rows={1}
             />
             <button
               type="submit"
-              disabled={!input.trim() || isTyping || !activePersona}
+              disabled={!input.trim() || isTyping || !activePersona || !runId}
               className="absolute right-1.5 bottom-1.5 w-7.5 h-7.5 flex items-center justify-center text-white bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 rounded-md transition-colors shadow-md shrink-0"
             >
               {isTyping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3 h-3 ml-0.5" />}

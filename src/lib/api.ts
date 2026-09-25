@@ -1,6 +1,8 @@
 // Browser-side client for the MarketMind API server (server/index.ts).
-// All Gemini calls happen on the server; the API key never reaches the browser.
-import type { ChatTurn, CustomerData, Persona, SimulateEvent } from "./types";
+// All Gemini calls and database access happen on the server; requests carry
+// the signed-in user's Supabase access token.
+import { auth } from "./supabase";
+import type { ChatTurn, Panel, Persona, SavedRun, SharedRun, SimulateEvent, SimulateRequest } from "./types";
 
 async function errorFromResponse(res: Response): Promise<Error> {
   try {
@@ -12,28 +14,46 @@ async function errorFromResponse(res: Response): Promise<Error> {
   return new Error(`Request failed (HTTP ${res.status}). Please try again.`);
 }
 
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data } = await auth.getSession();
+  const token = data.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/** fetch() with the user's token; throws the server's error message on failure. */
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers: Record<string, string> = { ...(await authHeaders()), ...(init.headers as Record<string, string>) };
+  if (init.body) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { ...init, headers });
+  if (!res.ok) throw await errorFromResponse(res);
+  return res;
+}
+
+async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await apiFetch(path, init);
+  return (await res.json()) as T;
+}
+
+// ── Simulations ──────────────────────────────────────────────────────────────
+
 /**
  * Runs a full simulation. Calls onPersonas once the cohort is ready, then
- * onReportChunk for each streamed piece of the report. Resolves with the full report.
+ * onReportChunk for each streamed piece of the report. Resolves with the run
+ * as saved in the database.
  */
 export async function runSimulation(
-  data: CustomerData,
+  request: SimulateRequest,
   handlers: {
     onPersonas: (personas: Persona[]) => void;
     onReportChunk: (delta: string) => void;
   },
-): Promise<string> {
-  const res = await fetch("/api/simulate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok || !res.body) throw await errorFromResponse(res);
+): Promise<SavedRun> {
+  const res = await apiFetch("/api/simulate", { method: "POST", body: JSON.stringify(request) });
+  if (!res.body) throw new Error("The server returned an empty response. Please try again.");
 
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";
-  let report = "";
-  let finished = false;
+  let saved: SavedRun | null = null;
 
   const handleLine = (line: string) => {
     if (!line.trim()) return;
@@ -43,13 +63,14 @@ export async function runSimulation(
         handlers.onPersonas(event.personas);
         break;
       case "report":
-        report += event.delta;
         handlers.onReportChunk(event.delta);
+        break;
+      case "saved":
+        saved = event.run;
         break;
       case "error":
         throw new Error(event.message);
       case "done":
-        finished = true;
         break;
     }
   };
@@ -64,24 +85,54 @@ export async function runSimulation(
   }
   handleLine(buffer);
 
-  if (!finished) {
+  if (!saved) {
     throw new Error("The connection to the server was interrupted. Please try again.");
   }
-  return report;
+  return saved;
 }
 
-export async function sendChatMessage(
-  history: ChatTurn[],
-  message: string,
-  persona: Persona,
-  variants: string[],
-): Promise<string> {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ history, message, persona, variants }),
-  });
+export async function listRuns(): Promise<SavedRun[]> {
+  return (await apiJson<{ runs: SavedRun[] }>("/api/runs")).runs;
+}
+
+export async function deleteRun(id: string): Promise<void> {
+  await apiFetch(`/api/runs/${id}`, { method: "DELETE" });
+}
+
+/** Turns the public share link on (true) or off (false). Returns the updated run. */
+export async function setSharing(id: string, enabled: boolean): Promise<SavedRun> {
+  return (await apiJson<{ run: SavedRun }>(`/api/runs/${id}/share`, { method: enabled ? "POST" : "DELETE" })).run;
+}
+
+/** Public, no sign-in required. */
+export async function getSharedRun(shareId: string): Promise<SharedRun> {
+  const res = await fetch(`/api/share/${encodeURIComponent(shareId)}`);
   if (!res.ok) throw await errorFromResponse(res);
-  const body = (await res.json()) as { reply?: string };
-  return body.reply ?? "";
+  return ((await res.json()) as { run: SharedRun }).run;
+}
+
+// ── Interviews ───────────────────────────────────────────────────────────────
+
+/** Sends one interview message. Resolves with the full updated transcript. */
+export async function sendChatMessage(runId: string, personaIndex: number, message: string): Promise<ChatTurn[]> {
+  return (
+    await apiJson<{ messages: ChatTurn[] }>("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ runId, personaIndex, message }),
+    })
+  ).messages;
+}
+
+// ── Panels ───────────────────────────────────────────────────────────────────
+
+export async function listPanels(): Promise<Panel[]> {
+  return (await apiJson<{ panels: Panel[] }>("/api/panels")).panels;
+}
+
+export async function createPanel(runId: string, name: string): Promise<Panel> {
+  return (await apiJson<{ panel: Panel }>("/api/panels", { method: "POST", body: JSON.stringify({ runId, name }) })).panel;
+}
+
+export async function deletePanel(id: string): Promise<void> {
+  await apiFetch(`/api/panels/${id}`, { method: "DELETE" });
 }

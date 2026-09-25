@@ -16,3 +16,26 @@
   0%, 100% { opacity: 1; }
   50%       { opacity: 0; }
 }
+
+/* ── PDF export: print only the PrintReport document ─────────────────────── */
+.print-only { display: none; }
+
+@media print {
+  @page { margin: 16mm; }
+  body { background: #fff !important; color: #111 !important; }
+  #root { display: none !important; }
+  .print-only { display: block; }
+
+  .print-report { font-size: 10.5pt; line-height: 1.5; color: #111; }
+  .print-report h1 { font-size: 18pt; font-weight: 700; margin: 0 0 4pt; }
+  .print-report h2 { font-size: 13pt; font-weight: 700; margin: 16pt 0 6pt; border-bottom: 1px solid #ddd; padding-bottom: 3pt; }
+  .print-report h3 { font-size: 11.5pt; font-weight: 600; margin: 10pt 0 4pt; }
+  .print-report p, .print-report li { margin: 0 0 5pt; }
+  .print-report ul, .print-report ol { padding-left: 16pt; list-style: revert; }
+  .print-report .muted { color: #555; font-size: 9pt; }
+  .print-report table { width: 100%; border-collapse: collapse; margin: 4pt 0 6pt; }
+  .print-report th, .print-report td { border: 1px solid #ccc; padding: 4pt 6pt; text-align: left; vertical-align: top; }
+  .print-report th { background: #f3f4f6; font-weight: 600; }
+  .print-report tr { break-inside: avoid; }
+  .print-report h2, .print-report h3 { break-after: avoid; }
+}

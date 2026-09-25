@@ -19,7 +19,10 @@ interface InsightsViewerProps {
   variants: string[];
   progressMsg: string;
   errorMsg?: string | null;
-  onRegenerate: () => void;
+  /** Omitted on read-only views (share links). */
+  onRegenerate?: () => void;
+  /** Extra controls shown above the result tabs (export, share, save panel). */
+  actions?: React.ReactNode;
   isLoading: boolean;
 }
 
@@ -31,6 +34,7 @@ export function InsightsViewer({
   progressMsg,
   errorMsg,
   onRegenerate,
+  actions,
   isLoading,
 }: InsightsViewerProps) {
   const [activeSubTab, setActiveSubTab] = useState<'roster' | 'charts' | 'report'>('roster');
@@ -65,13 +69,13 @@ export function InsightsViewer({
         </div>
         <h3 className="text-xl font-bold text-rose-300 mb-2">Simulation Failed</h3>
         <p className="text-slate-300 max-w-md mb-6">{errorMsg}</p>
-        <button
+        {onRegenerate && <button
           onClick={onRegenerate}
           className="flex items-center gap-2 px-6 py-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl transition-all shadow-md font-semibold"
         >
           <RefreshCw className="w-4 h-4" />
           Try Again
-        </button>
+        </button>}
       </div>
     );
   }
@@ -165,6 +169,8 @@ export function InsightsViewer({
         </div>
       )}
 
+      {actions && <div className="flex justify-end">{actions}</div>}
+
       {/* Sub-tab selectors */}
       <div className="flex flex-wrap gap-2 border-b border-slate-800 justify-between items-center pb-2">
         <div className="flex flex-wrap gap-2">
@@ -213,14 +219,14 @@ export function InsightsViewer({
           </button>
         </div>
 
-        <button
+        {onRegenerate && <button
           onClick={onRegenerate}
           disabled={isLoading}
           className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold text-slate-350 hover:text-blue-300 hover:bg-blue-500/10 rounded-xl transition-all border border-slate-800 hover:border-blue-500/35 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <RefreshCw className="w-3.5 h-3.5" />
           Re-simulate Focus Group
-        </button>
+        </button>}
       </div>
 
       {/* Variant picker: which variant the roster and keyword chart show */}

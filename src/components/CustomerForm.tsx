@@ -1,16 +1,30 @@
 import React, { useState } from 'react';
-import { Sparkles, Users, Compass, MapPin, DollarSign, HelpCircle, UserCheck, AlertCircle, GitCompare, Plus, X } from 'lucide-react';
+import { Sparkles, Users, Compass, MapPin, DollarSign, HelpCircle, UserCheck, AlertCircle, GitCompare, Plus, X, UserPlus, Repeat } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { type CustomerData, DIVERSE_RANDOM, MAX_ALTERNATIVE_VARIANTS } from '../lib/types';
+import { type CustomerData, type Panel, type SimulateRequest, DIVERSE_RANDOM, MAX_ALTERNATIVE_VARIANTS } from '../lib/types';
 import { VARIANT_LETTERS } from '../lib/variants';
 
 interface CustomerFormProps {
   initialData: CustomerData;
-  onSubmit: (data: CustomerData) => void;
+  /** Saved panels the user can re-use instead of recruiting new personas. */
+  panels: Panel[];
+  /** Pre-selects a panel (e.g. when re-running from a panel-based result). */
+  initialPanelId?: string | null;
+  onSubmit: (request: SimulateRequest) => void;
   isLoading: boolean;
 }
 
-export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormProps) {
+const showDemographic = (value?: string) =>
+  !value || value === DIVERSE_RANDOM ? 'Diverse' : value;
+
+export function CustomerForm({ initialData, panels, initialPanelId, onSubmit, isLoading }: CustomerFormProps) {
+  // Re-use a saved panel (same people) or recruit new personas
+  const [panelId, setPanelId] = useState<string>(
+    initialPanelId && panels.some((p) => p.id === initialPanelId) ? initialPanelId : ''
+  );
+  const [reusePanel, setReusePanel] = useState(Boolean(panelId));
+  const panel = reusePanel ? panels.find((p) => p.id === panelId) : undefined;
+
   const [data, setData] = useState<CustomerData>({
     ageRange:             initialData.ageRange             ?? '',
     gender:               initialData.gender               ?? '',
@@ -38,14 +52,31 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
       );
       return;
     }
+    if (reusePanel && !panel) {
+      setValidationError('Choose a saved panel, or switch to recruiting new personas.');
+      return;
+    }
     setValidationError(null);
+
+    // Blank variant boxes are ignored rather than sent as empty variants
+    const variants = alternatives.map((v) => v.trim()).filter(Boolean);
+
+    // A re-used panel keeps its own demographics; only the question is new
+    if (panel) {
+      onSubmit({
+        panelId: panel.id,
+        questionOrProductInfo: trimmedQuestion,
+        ...(variants.length > 0 ? { alternativeVariants: variants } : {}),
+      });
+      return;
+    }
 
     // ── Optional field fallback injection ──────────────────────────────────
     // Any optional field left blank by the user receives the DIVERSE_RANDOM
     // sentinel. The prompt builder in gemini.ts detects this value and
     // instructs the LLM to maximise demographic variance across all 10
     // personas for that dimension, producing a "wildcard" focus group.
-    const payload: CustomerData = {
+    const payload: SimulateRequest = {
       ageRange:             data.ageRange?.trim()    || DIVERSE_RANDOM,
       gender:               data.gender?.trim()      || DIVERSE_RANDOM,
       habits:               data.habits?.trim()      || DIVERSE_RANDOM,
@@ -53,8 +84,6 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
       incomeLevel:          data.incomeLevel?.trim() || DIVERSE_RANDOM,
       questionOrProductInfo: trimmedQuestion,
     };
-    // Blank variant boxes are ignored rather than sent as empty variants
-    const variants = alternatives.map((v) => v.trim()).filter(Boolean);
     if (variants.length > 0) payload.alternativeVariants = variants;
 
     onSubmit(payload);
@@ -79,7 +108,72 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
 
         {/* Form Body */}
         <div className="p-6 space-y-6">
+          {/* Participants: new personas or a saved panel */}
+          <fieldset className="space-y-3">
+            <legend className="text-sm font-semibold text-slate-300 mb-2">Participants</legend>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {[
+                { value: false, icon: UserPlus, title: 'Recruit new personas', text: 'Generate 10 new people from the settings below.' },
+                { value: true, icon: Repeat, title: 'Re-use a saved panel', text: panels.length ? 'Ask the same people a new question.' : 'Save a panel from any result to re-use it here.' },
+              ].map(({ value, icon: Icon, title, text }) => {
+                const disabled = value && panels.length === 0;
+                return (
+                  <label
+                    key={title}
+                    className={cn(
+                      "flex gap-3 p-3.5 rounded-xl border cursor-pointer transition-colors",
+                      reusePanel === value ? "border-blue-500/50 bg-blue-500/5" : "border-slate-800 hover:border-slate-700",
+                      disabled && "opacity-50 cursor-not-allowed hover:border-slate-800"
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="participants"
+                      className="sr-only"
+                      checked={reusePanel === value}
+                      disabled={disabled}
+                      onChange={() => {
+                        setReusePanel(value);
+                        if (value && !panelId && panels[0]) setPanelId(panels[0].id);
+                        setValidationError(null);
+                      }}
+                    />
+                    <Icon className={cn("w-5 h-5 shrink-0 mt-0.5", reusePanel === value ? "text-blue-400" : "text-slate-500")} />
+                    <span>
+                      <span className="block text-sm font-semibold text-slate-200">{title}</span>
+                      <span className="block text-xs text-slate-500 mt-0.5">{text}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {reusePanel && (
+              <div className="space-y-2">
+                <select
+                  aria-label="Saved panel"
+                  value={panelId}
+                  onChange={(e) => setPanelId(e.target.value)}
+                  className="w-full p-3 rounded-xl bg-slate-950/50 border border-slate-800 focus:border-blue-500 text-slate-200 outline-none"
+                >
+                  {panels.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.personas.length} people)</option>
+                  ))}
+                </select>
+                {panel && (
+                  <div className="p-3.5 rounded-xl bg-slate-950/40 border border-slate-800 text-xs text-slate-400 space-y-1.5">
+                    <p>
+                      Age {showDemographic(panel.customerData.ageRange)} · Gender {showDemographic(panel.customerData.gender)} · Location {showDemographic(panel.customerData.location)} · Income {showDemographic(panel.customerData.incomeLevel)}
+                    </p>
+                    <p className="text-slate-500">{panel.personas.map((p) => p.name).join(', ')}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </fieldset>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {!panel && (<>
 
             {/* Field 1: Target Age Range — optional */}
             <div>
@@ -158,6 +252,8 @@ export function CustomerForm({ initialData, onSubmit, isLoading }: CustomerFormP
                 onChange={(e) => setData({ ...data, incomeLevel: e.target.value })}
               />
             </div>
+
+            </>)}
 
             {/* Field 6: Question / Product Info — REQUIRED */}
             <div className="md:col-span-2">

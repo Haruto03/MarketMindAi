@@ -1,9 +1,14 @@
 import "dotenv/config";
 import path from "path";
-import express, { type Request, type Response, type NextFunction } from "express";
+import { randomUUID } from "crypto";
+import express, { type Request, type Response, type NextFunction, type RequestHandler } from "express";
 import rateLimit from "express-rate-limit";
-import { analyzePersonaDataStream, chatWithPersona, generatePersonaBatch, validatePersona } from "./gemini";
-import { MAX_ALTERNATIVE_VARIANTS, type ChatTurn, type CustomerData, type SimulateEvent } from "../src/lib/types";
+import type { User } from "@supabase/supabase-js";
+import { analyzePersonaDataStream, chatWithPersona, generatePersonaBatch } from "./gemini";
+import * as db from "./db";
+import { MAX_ALTERNATIVE_VARIANTS, type CustomerData, type PanelPersona, type SimulateEvent } from "../src/lib/types";
+import { greetingFor, toPanelPersona } from "../src/lib/personas";
+import { variantCount, variantTexts } from "../src/lib/variants";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration (all overridable through environment variables)
@@ -16,35 +21,81 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
-// Per-IP limits
+// Per-user limits (stored in the database, so they survive restarts)
 const SIMULATIONS_PER_HOUR = envInt("SIMULATIONS_PER_HOUR", 10);
 const CHAT_MESSAGES_PER_HOUR = envInt("CHAT_MESSAGES_PER_HOUR", 100);
-// Whole-server limits, a hard ceiling on spend regardless of how many IPs call
+// Whole-service limits, a hard ceiling on spend regardless of how many users call
 const DAILY_SIMULATION_CAP = envInt("DAILY_SIMULATION_CAP", 200);
 const DAILY_CHAT_CAP = envInt("DAILY_CHAT_CAP", 2000);
+// Per-IP request ceiling across the whole API (abuse guard in front of auth)
+const API_REQUESTS_PER_15_MIN = envInt("API_REQUESTS_PER_15_MIN", 300);
 
 // Input size limits
 const MAX_FIELD_CHARS = 300;
 const MAX_QUESTION_CHARS = 2000;
 const MAX_CHAT_MESSAGE_CHARS = 1000;
-const MAX_CHAT_HISTORY_TURNS = 40;
-const MAX_PERSONA_FIELD_CHARS = 1500;
-const MAX_MODEL_TURN_CHARS = MAX_QUESTION_CHARS + MAX_PERSONA_FIELD_CHARS + 1000;
+const MAX_CHAT_USER_TURNS = 20;
+const MAX_PANEL_NAME_CHARS = 120;
+const MAX_PANELS_PER_USER = 50;
 
-if (!process.env.GEMINI_API_KEY) {
-  console.error("GEMINI_API_KEY is not set. Add it to .env (see README) and restart.");
-  process.exit(1);
+{
+  const missing = [
+    !process.env.GEMINI_API_KEY && "GEMINI_API_KEY",
+    !db.supabaseConfig().url && "SUPABASE_URL (or VITE_SUPABASE_URL)",
+    !db.supabaseConfig().serviceRoleKey && "SUPABASE_SERVICE_ROLE_KEY",
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    console.error(`Missing environment variables: ${missing.join(", ")}. Add them to .env (see README) and restart.`);
+    process.exit(1);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Errors and async helpers
+// ─────────────────────────────────────────────────────────────────────────────
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+const badRequest = (message: string) => new HttpError(400, message);
+const notFound = (what: string) => new HttpError(404, `${what} not found.`);
+
+/** Async route handler: rejected promises go to the error handler (Express 4). */
+const route = (fn: (req: Request, res: Response) => Promise<void>): RequestHandler =>
+  (req, res, next) => { fn(req, res).catch(next); };
+
+/** Async middleware: continues to the next handler when fn resolves. */
+const middleware = (fn: (req: Request, res: Response) => Promise<void>): RequestHandler =>
+  (req, res, next) => { fn(req, res).then(() => next(), next); };
+
+const currentUser = (res: Response): User => res.locals.user as User;
+
+function publicAiErrorMessage(error: unknown): string {
+  const status = (error as { status?: number })?.status;
+  if (status === 429) {
+    return "The AI service is at capacity right now. Please wait a minute and try again.";
+  }
+  if (error instanceof Error && error.message.startsWith("Failed to parse data from AI")) {
+    return error.message;
+  }
+  return "The AI service failed to respond. Please try again.";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Validation helpers
 // ─────────────────────────────────────────────────────────────────────────────
-class BadRequest extends Error {}
-
 function optionalString(value: unknown, field: string, maxChars: number): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
-  if (typeof value !== "string") throw new BadRequest(`"${field}" must be a string.`);
-  if (value.length > maxChars) throw new BadRequest(`"${field}" must be at most ${maxChars} characters.`);
+  if (typeof value !== "string") throw badRequest(`"${field}" must be a string.`);
+  if (value.length > maxChars) throw badRequest(`"${field}" must be at most ${maxChars} characters.`);
+  return value;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function uuid(value: unknown, field: string): string {
+  if (typeof value !== "string" || !UUID_RE.test(value)) throw badRequest(`"${field}" must be a valid id.`);
   return value;
 }
 
@@ -63,111 +114,64 @@ function parseCustomerData(body: unknown): CustomerData {
 
 function parseAlternativeVariants(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!Array.isArray(value)) throw new BadRequest(`"alternativeVariants" must be an array.`);
+  if (!Array.isArray(value)) throw badRequest(`"alternativeVariants" must be an array.`);
   if (value.length > MAX_ALTERNATIVE_VARIANTS) {
-    throw new BadRequest(`At most ${MAX_ALTERNATIVE_VARIANTS} alternative variants are allowed.`);
+    throw badRequest(`At most ${MAX_ALTERNATIVE_VARIANTS} alternative variants are allowed.`);
   }
   const variants = value.map((v, i) => optionalString(v, `alternativeVariants[${i}]`, MAX_QUESTION_CHARS)?.trim() ?? "");
-  if (variants.some((v) => !v)) throw new BadRequest("A/B variants must not be empty.");
+  if (variants.some((v) => !v)) throw badRequest("A/B variants must not be empty.");
   return variants.length > 0 ? variants : undefined;
 }
 
-function parseChatRequest(body: unknown) {
-  const b = (body ?? {}) as Record<string, unknown>;
+/** Demographic settings only — what a panel remembers about how it was recruited. */
+function demographicsOf(data: CustomerData): CustomerData {
+  const { ageRange, gender, habits, location, incomeLevel } = data;
+  return { ageRange, gender, habits, location, incomeLevel };
+}
 
-  const message = optionalString(b.message, "message", MAX_CHAT_MESSAGE_CHARS)?.trim();
-  if (!message) throw new BadRequest(`"message" is required.`);
+// ─────────────────────────────────────────────────────────────────────────────
+// Middleware: authentication and usage limits
+// ─────────────────────────────────────────────────────────────────────────────
 
-  if (!Array.isArray(b.history)) throw new BadRequest(`"history" must be an array.`);
-  if (b.history.length > MAX_CHAT_HISTORY_TURNS) {
-    throw new BadRequest("This interview is too long. Switch persona or start a new simulation.");
-  }
-  const history: ChatTurn[] = b.history.map((turn, i) => {
-    const t = (turn ?? {}) as Record<string, unknown>;
-    if (t.role !== "user" && t.role !== "model") throw new BadRequest(`history[${i}].role is invalid.`);
-    // Model turns include the greeting, which quotes the question and the persona's answer
-    const limit = t.role === "user" ? MAX_CHAT_MESSAGE_CHARS : MAX_MODEL_TURN_CHARS;
-    return { role: t.role, text: optionalString(t.text, `history[${i}].text`, limit) ?? "" };
+/** Requires a valid Supabase access token in `Authorization: Bearer <token>`. */
+const requireUser = middleware(async (req, res) => {
+  const header = req.headers.authorization ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const user = token ? await db.userFromToken(token) : null;
+  if (!user) throw new HttpError(401, "Please sign in to continue.");
+  res.locals.user = user;
+});
+
+/**
+ * Checks the user's hourly allowance and the service-wide daily cap for an AI
+ * call, then records the call. Recording happens before the AI request so
+ * failed or abandoned requests still count against the limit.
+ */
+function usageGuard(kind: db.UsageKind, perHour: number, perDay: number, messages: { hour: string; day: string }) {
+  return middleware(async (_req, res) => {
+    const user = currentUser(res);
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const startOfUtcDay = `${new Date().toISOString().slice(0, 10)}T00:00:00Z`;
+
+    const [userCount, allCount] = await Promise.all([
+      db.countUserUsage(user.id, kind, hourAgo),
+      db.countAllUsage(kind, startOfUtcDay),
+    ]);
+    if (userCount >= perHour) throw new HttpError(429, messages.hour);
+    if (allCount >= perDay) throw new HttpError(429, messages.day);
+    await db.recordUsage(user.id, kind);
   });
-
-  if (!Array.isArray(b.variants) || b.variants.length < 1 || b.variants.length > 1 + MAX_ALTERNATIVE_VARIANTS) {
-    throw new BadRequest(`"variants" must be an array of 1 to ${1 + MAX_ALTERNATIVE_VARIANTS} strings.`);
-  }
-  const variants = b.variants.map((v, i) => optionalString(v, `variants[${i}]`, MAX_QUESTION_CHARS) ?? "");
-
-  let persona;
-  try {
-    persona = validatePersona(b.persona, 0, variants.length - 1);
-  } catch (e) {
-    throw new BadRequest(e instanceof Error ? e.message : "Invalid persona.");
-  }
-  const responses = [persona, ...(persona.alternatives ?? [])];
-  for (const obj of responses) {
-    for (const [key, value] of Object.entries(obj)) {
-      if (typeof value === "string" && value.length > MAX_PERSONA_FIELD_CHARS) {
-        throw new BadRequest(`persona.${key} is too long.`);
-      }
-    }
-  }
-
-  return { message, history, persona, variants };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Rate limiting
-// ─────────────────────────────────────────────────────────────────────────────
-const tooManyRequests = (message: string) => (_req: Request, res: Response) => {
-  res.status(429).json({ error: message });
-};
-
-const simulateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: SIMULATIONS_PER_HOUR,
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  handler: tooManyRequests(`You can run up to ${SIMULATIONS_PER_HOUR} simulations per hour. Please try again later.`),
+const simulationAllowance = usageGuard("simulation", SIMULATIONS_PER_HOUR, DAILY_SIMULATION_CAP, {
+  hour: `You can run up to ${SIMULATIONS_PER_HOUR} simulations per hour. Please try again later.`,
+  day: "The daily simulation limit for this service has been reached. Please try again tomorrow.",
 });
 
-const chatLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: CHAT_MESSAGES_PER_HOUR,
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  handler: tooManyRequests(`You can send up to ${CHAT_MESSAGES_PER_HOUR} interview messages per hour. Please try again later.`),
+const chatAllowance = usageGuard("chat", CHAT_MESSAGES_PER_HOUR, DAILY_CHAT_CAP, {
+  hour: `You can send up to ${CHAT_MESSAGES_PER_HOUR} interview messages per hour. Please try again later.`,
+  day: "The daily interview limit for this service has been reached. Please try again tomorrow.",
 });
-
-/** In-memory counter that resets at UTC midnight. Caps total spend per server instance. */
-function dailyCap(limit: number, message: string) {
-  let day = "";
-  let count = 0;
-  return (_req: Request, res: Response, next: NextFunction) => {
-    const today = new Date().toISOString().slice(0, 10);
-    if (today !== day) {
-      day = today;
-      count = 0;
-    }
-    if (count >= limit) {
-      res.status(429).json({ error: message });
-      return;
-    }
-    count++;
-    next();
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Error mapping — details stay in the server log, the browser gets a safe message
-// ─────────────────────────────────────────────────────────────────────────────
-function publicErrorMessage(error: unknown): string {
-  const status = (error as { status?: number })?.status;
-  if (status === 429) {
-    return "The AI service is at capacity right now. Please wait a minute and try again.";
-  }
-  if (error instanceof Error && error.message.startsWith("Failed to parse data from AI")) {
-    return error.message;
-  }
-  return "The AI service failed to respond. Please try again.";
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App
@@ -180,26 +184,48 @@ if (process.env.TRUST_PROXY) {
   app.set("trust proxy", Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
 }
 
-app.use("/api", express.json({ limit: "64kb" }));
+app.use(
+  "/api",
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: API_REQUESTS_PER_15_MIN,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    handler: (_req, res) => { res.status(429).json({ error: "Too many requests. Please slow down." }); },
+  }),
+  express.json({ limit: "64kb" }),
+);
+
+// ── Simulations ──────────────────────────────────────────────────────────────
 
 /**
  * Runs a full focus-group simulation and streams the result as NDJSON:
- * one "personas" event, then "report" deltas, then "done" (or "error").
- * Personas and report are generated in one request so the report can only
- * ever be produced from server-generated personas.
+ * "personas", then "report" deltas, then "saved" (the stored run) and "done"
+ * — or "error". Personas and report are generated in one request so the
+ * report can only ever be produced from server-generated personas.
  */
 app.post(
   "/api/simulate",
-  simulateLimiter,
-  dailyCap(DAILY_SIMULATION_CAP, "The daily simulation limit for this demo has been reached. Please try again tomorrow."),
-  async (req, res) => {
-    let data: CustomerData;
-    try {
-      data = parseCustomerData(req.body);
-    } catch (e) {
-      res.status(400).json({ error: (e as Error).message });
-      return;
+  requireUser,
+  // Validate before counting usage, so malformed requests don't use up the allowance
+  middleware(async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const data = parseCustomerData(body);
+    let panel: Awaited<ReturnType<typeof db.getPanel>> = null;
+    if (body.panelId !== undefined && body.panelId !== null && body.panelId !== "") {
+      panel = await db.getPanel(currentUser(res).id, uuid(body.panelId, "panelId"));
+      if (!panel) throw notFound("Panel");
     }
+    res.locals.data = data;
+    res.locals.panel = panel;
+  }),
+  simulationAllowance,
+  async (_req, res) => {
+    const user = currentUser(res);
+    const panel = res.locals.panel as Awaited<ReturnType<typeof db.getPanel>>;
+    const input = res.locals.data as CustomerData;
+    // A re-used panel keeps the demographics it was recruited with
+    const data: CustomerData = panel ? { ...input, ...demographicsOf(panel.customerData) } : input;
 
     res.status(200);
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -214,55 +240,184 @@ app.post(
     };
 
     try {
-      const personas = await generatePersonaBatch(data);
+      const personas = await generatePersonaBatch(data, panel?.personas);
       send({ type: "personas", personas });
-      if (clientGone) return;
 
-      await analyzePersonaDataStream(personas, data, (delta) => {
+      // Keep going if the tab closes: the run is saved and shows up in history
+      const report = await analyzePersonaDataStream(personas, data, (delta) => {
         send({ type: "report", delta });
       });
+
+      const run = await db.insertRun(user.id, { customerData: data, personas, report, panelId: panel?.id ?? null });
+      send({ type: "saved", run });
       send({ type: "done" });
     } catch (error) {
       console.error("[simulate]", error);
-      send({ type: "error", message: publicErrorMessage(error) });
+      send({ type: "error", message: publicAiErrorMessage(error) });
     } finally {
       res.end();
     }
   },
 );
 
+// ── Saved runs ───────────────────────────────────────────────────────────────
+
+app.get("/api/runs", requireUser, route(async (_req, res) => {
+  res.json({ runs: await db.listRuns(currentUser(res).id) });
+}));
+
+app.get("/api/runs/:id", requireUser, route(async (req, res) => {
+  const run = await db.getRun(currentUser(res).id, uuid(req.params.id, "id"));
+  if (!run) throw notFound("Simulation");
+  res.json({ run });
+}));
+
+app.delete("/api/runs/:id", requireUser, route(async (req, res) => {
+  const deleted = await db.deleteRun(currentUser(res).id, uuid(req.params.id, "id"));
+  if (!deleted) throw notFound("Simulation");
+  res.status(204).end();
+}));
+
+/** Turns on the public share link (idempotent — keeps an existing link). */
+app.post("/api/runs/:id/share", requireUser, route(async (req, res) => {
+  const userId = currentUser(res).id;
+  const runId = uuid(req.params.id, "id");
+  const existing = await db.getRun(userId, runId);
+  if (!existing) throw notFound("Simulation");
+  const run = existing.shareId ? existing : await db.setRunShareId(userId, runId, randomUUID());
+  res.json({ run });
+}));
+
+/** Turns off the public share link; the old link stops working. */
+app.delete("/api/runs/:id/share", requireUser, route(async (req, res) => {
+  const run = await db.setRunShareId(currentUser(res).id, uuid(req.params.id, "id"), null);
+  if (!run) throw notFound("Simulation");
+  res.json({ run });
+}));
+
+// ── Public share links ───────────────────────────────────────────────────────
+
+app.get(
+  "/api/share/:shareId",
+  rateLimit({
+    windowMs: 60 * 1000,
+    limit: 60,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    handler: (_req, res) => { res.status(429).json({ error: "Too many requests. Please slow down." }); },
+  }),
+  route(async (req, res) => {
+    const run = await db.getSharedRun(uuid(req.params.shareId, "shareId"));
+    if (!run) throw notFound("Shared simulation");
+    res.json({ run });
+  }),
+);
+
+// ── Interviews ───────────────────────────────────────────────────────────────
+
+/**
+ * One interview turn. The persona and transcript are loaded from the stored
+ * run — the browser only says which run and which participant — so the
+ * roleplay prompt can't be tampered with, and the transcript is saved here.
+ */
 app.post(
   "/api/chat",
-  chatLimiter,
-  dailyCap(DAILY_CHAT_CAP, "The daily interview limit for this demo has been reached. Please try again tomorrow."),
-  async (req, res) => {
-    let parsed;
-    try {
-      parsed = parseChatRequest(req.body);
-    } catch (e) {
-      res.status(400).json({ error: (e as Error).message });
-      return;
-    }
+  requireUser,
+  middleware(async (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const message = optionalString(b.message, "message", MAX_CHAT_MESSAGE_CHARS)?.trim();
+    if (!message) throw badRequest(`"message" is required.`);
+    const personaIndex = Number(b.personaIndex);
 
+    const run = await db.getRun(currentUser(res).id, uuid(b.runId, "runId"));
+    if (!run) throw notFound("Simulation");
+    const persona = run.personas[personaIndex];
+    if (!Number.isInteger(personaIndex) || !persona) throw badRequest(`"personaIndex" is invalid.`);
+
+    const variants = variantTexts(run.customerData).slice(0, variantCount(run.personas));
+    const transcript = run.chats[personaIndex]?.length ? run.chats[personaIndex] : [greetingFor(persona, variants)];
+    if (transcript.filter((t) => t.role === "user").length >= MAX_CHAT_USER_TURNS) {
+      throw badRequest(`Interviews are limited to ${MAX_CHAT_USER_TURNS} questions per participant.`);
+    }
+    res.locals.chat = { run, persona, personaIndex, variants, transcript, message };
+  }),
+  chatAllowance,
+  route(async (_req, res) => {
+    const userId = currentUser(res).id;
+    const { run, persona, personaIndex, variants, transcript, message } = res.locals.chat as {
+      run: NonNullable<Awaited<ReturnType<typeof db.getRun>>>;
+      persona: (typeof run.personas)[number];
+      personaIndex: number;
+      variants: string[];
+      transcript: typeof run.chats[number];
+      message: string;
+    };
+
+    let reply: string;
     try {
-      const reply = await chatWithPersona(parsed.history, parsed.message, parsed.persona, parsed.variants);
-      res.json({ reply });
+      reply = await chatWithPersona(transcript, message, persona, variants);
     } catch (error) {
       console.error("[chat]", error);
-      res.status(502).json({ error: publicErrorMessage(error) });
+      throw new HttpError(502, publicAiErrorMessage(error));
     }
-  },
+    const messages = [
+      ...transcript,
+      { role: "user" as const, text: message },
+      { role: "model" as const, text: reply || "I'm sorry, I couldn't form a response right now. Could you try asking again?" },
+    ];
+
+    // Re-read just before writing so a concurrent interview with another
+    // participant in the same run isn't overwritten.
+    const latest = (await db.getRun(userId, run.id)) ?? run;
+    await db.updateRunChats(userId, run.id, { ...latest.chats, [personaIndex]: messages });
+    res.json({ messages });
+  }),
 );
+
+// ── Panels (re-usable persona cohorts) ───────────────────────────────────────
+
+app.get("/api/panels", requireUser, route(async (_req, res) => {
+  res.json({ panels: await db.listPanels(currentUser(res).id) });
+}));
+
+/** Saves the people from a run as a panel that can answer future questions. */
+app.post("/api/panels", requireUser, route(async (req, res) => {
+  const userId = currentUser(res).id;
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const name = optionalString(b.name, "name", MAX_PANEL_NAME_CHARS)?.trim();
+  if (!name) throw badRequest(`"name" is required.`);
+
+  const run = await db.getRun(userId, uuid(b.runId, "runId"));
+  if (!run) throw notFound("Simulation");
+  if (run.panelId) throw new HttpError(409, "These personas already belong to a saved panel.");
+  if ((await db.listPanels(userId)).length >= MAX_PANELS_PER_USER) {
+    throw badRequest(`You can save up to ${MAX_PANELS_PER_USER} panels. Delete one to save another.`);
+  }
+
+  const personas: PanelPersona[] = run.personas.map(toPanelPersona);
+  const panel = await db.insertPanel(userId, { name, customerData: demographicsOf(run.customerData), personas });
+  // The run's personas now belong to this panel (also prevents saving them twice)
+  await db.setRunPanelId(userId, run.id, panel.id);
+  res.status(201).json({ panel });
+}));
+
+app.delete("/api/panels/:id", requireUser, route(async (req, res) => {
+  const deleted = await db.deletePanel(currentUser(res).id, uuid(req.params.id, "id"));
+  if (!deleted) throw notFound("Panel");
+  res.status(204).end();
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
-// Malformed JSON bodies and oversize payloads from express.json()
+// HttpErrors carry their own status; JSON parse / payload errors come from express.json()
 app.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
   if (res.headersSent) return next(err);
-  const status = err.status && err.status < 500 ? err.status : 500;
-  if (status === 500) console.error(err);
+  const status = err instanceof HttpError ? err.status : err.status && err.status < 500 ? err.status : 500;
+  if (status >= 500) console.error(err);
   res.status(status).json({ error: status === 500 ? "Internal server error" : err.message });
 });
 

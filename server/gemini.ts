@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { DIVERSE_RANDOM, type ChatTurn, type CustomerData, type Persona, type VariantResponse } from "../src/lib/types";
+import { DIVERSE_RANDOM, type ChatTurn, type CustomerData, type PanelPersona, type Persona, type VariantResponse } from "../src/lib/types";
 import { VARIANT_LETTERS, variantCount, variantStats, variantTexts } from "../src/lib/variants";
 
 // Server-only module: the API key is read from the server's environment and
@@ -144,22 +144,44 @@ function personaResponseSchema(alternativeCount: number) {
 
   if (alternativeCount > 0) {
     required.push("alternatives");
-    properties.alternatives = {
-      type: Type.ARRAY,
-      description: `This same persona's independent reaction to each A/B variant after Variant A, in order (${VARIANT_LETTERS.slice(1, alternativeCount + 1).join(", ")}). The top-level score/answer/feedback/keywords are the reaction to Variant A.`,
-      minItems: String(alternativeCount),
-      maxItems: String(alternativeCount),
-      items: {
-        type: Type.OBJECT,
-        required: Object.keys(responseProperties),
-        properties: responseProperties,
-      },
-    };
+    properties.alternatives = alternativesProperty(alternativeCount);
   }
 
   return {
     type: Type.ARRAY,
     description: "List of exactly 10 simulated focus group participant personas.",
+    items: { type: Type.OBJECT, required, properties },
+  };
+}
+
+function alternativesProperty(alternativeCount: number) {
+  return {
+    type: Type.ARRAY,
+    description: `This same persona's independent reaction to each A/B variant after Variant A, in order (${VARIANT_LETTERS.slice(1, alternativeCount + 1).join(", ")}). The top-level score/answer/feedback/keywords are the reaction to Variant A.`,
+    minItems: String(alternativeCount),
+    maxItems: String(alternativeCount),
+    items: {
+      type: Type.OBJECT,
+      required: Object.keys(responseProperties),
+      properties: responseProperties,
+    },
+  };
+}
+
+/** Schema for a re-used panel: only the answers, keyed by each participant's id. */
+function panelResponseSchema(alternativeCount: number, size: number) {
+  const required = ["id", ...Object.keys(responseProperties)];
+  const properties: Record<string, unknown> = {
+    id: { type: Type.INTEGER, description: "The participant's id, copied exactly from the panel list." },
+    ...responseProperties,
+  };
+  if (alternativeCount > 0) {
+    required.push("alternatives");
+    properties.alternatives = alternativesProperty(alternativeCount);
+  }
+  return {
+    type: Type.ARRAY,
+    description: `Exactly ${size} responses, one per panel participant, in the same order as the panel list.`,
     items: { type: Type.OBJECT, required, properties },
   };
 }
@@ -182,107 +204,8 @@ function resolveField(
   return trimmed;
 }
 
-/** Extra prompt section for A/B tests; empty when only one variant is given. */
-function buildAbTestBlock(data: CustomerData): string {
-  const variants = variantTexts(data);
-  if (variants.length < 2) return '';
-
-  const list = variants
-    .map((text, i) => `  VARIANT ${VARIANT_LETTERS[i]}: ${text}`)
-    .join('\n');
-  const altLetters = VARIANT_LETTERS.slice(1, variants.length).join(', ');
-
-  return `
-═══════════════════════════════════════════════════════════════════
-  A/B TEST — ${variants.length} VARIANTS SHOWN TO THE SAME PERSONAS
-═══════════════════════════════════════════════════════════════════
-${list}
-
-  • The QUESTION / PRODUCT INFO above is VARIANT A.
-  • Every persona sees EVERY variant. The top-level sentimentScore,
-    answerToQuestion, feedback and keywords are their reaction to VARIANT A.
-  • "alternatives" must contain their reaction to variant ${altLetters}, in that order.
-  • Score each variant INDEPENDENTLY with the same rubric below. The same
-    persona may love one variant and reject another — differences in price,
-    features, or messaging must move the score realistically. Do not copy
-    the Variant A score by default.
-  • Each variant's answerToQuestion should respond to THAT variant and may
-    compare it to the others where natural.
-`;
-}
-
-function buildPersonaPrompt(data: CustomerData): string {
-  // ── Per-field diversity directives ─────────────────────────────────────
-  // Each one tells the LLM exactly how to spread a single dimension across
-  // the 10-persona cohort. Being explicit prevents the model from
-  // defaulting to a narrow "safe" cluster.
-  const ageDirective =
-    '🔀 DIVERSE_RANDOM — You MUST spread ages across the full human lifespan: ' +
-    'include at least one child/teen (8–17), young adults (18–29), ' +
-    'middle-aged adults (30–54), and seniors (55+). ' +
-    'No two personas should share the same age bracket.';
-
-  const genderDirective =
-    '🔀 DIVERSE_RANDOM — You MUST vary gender representation: ' +
-    'include a realistic mix of male, female, and non-binary identities across the 10 personas.';
-
-  const habitsDirective =
-    '🔀 DIVERSE_RANDOM — You MUST assign sharply contrasting lifestyles: ' +
-    'mix tech-savvy early adopters, outdoor enthusiasts, homebodies, ' +
-    'fitness-focused individuals, budget-conscious shoppers, luxury seekers, ' +
-    'creatives, remote workers, students, and retirees. ' +
-    'No two personas should have similar lifestyle profiles.';
-
-  const locationDirective =
-    '🔀 DIVERSE_RANDOM — You MUST scatter geographic backgrounds: ' +
-    'include major global cities, mid-size towns, suburban areas, and rural regions ' +
-    'across different countries/continents. Ensure geographic and cultural diversity.';
-
-  const incomeDirective =
-    '🔀 DIVERSE_RANDOM — You MUST distribute income levels across the full economic spectrum: ' +
-    'include poverty/student-level, lower-middle, middle, upper-middle, and high-income personas. ' +
-    'At least one persona should face genuine financial constraints for the product.';
-
-  const resolvedAge      = resolveField(data.ageRange,    ageDirective,      'No specific constraint (please simulate a broad age cohort)');
-  const resolvedGender   = resolveField(data.gender,      genderDirective,   'No specific constraint (simulate diverse representation)');
-  const resolvedHabits   = resolveField(data.habits,      habitsDirective,   'Complement dynamically with realistic consumer lifestyles');
-  const resolvedLocation = resolveField(data.location,    locationDirective, 'Complement with standard suburban/urban locations');
-  const resolvedIncome   = resolveField(data.incomeLevel, incomeDirective,   'Complement with standard household income metrics');
-
-  // Count how many fields are in wildcard mode so we can inject a top-level reminder
-  const wildcardFields = [data.ageRange, data.gender, data.habits, data.location, data.incomeLevel]
-    .filter(v => !v?.trim() || v.trim() === DIVERSE_RANDOM);
-  const wildcardBlock = wildcardFields.length > 0
-    ? `
-═══════════════════════════════════════════════════════════════════
-  ⚡ TOTAL COHORT DIVERSITY MODE  (${wildcardFields.length} of 5 fields randomised)
-═══════════════════════════════════════════════════════════════════
-  Fields marked 🔀 DIVERSE_RANDOM below are in WILDCARD mode.
-  For every such field you are STRICTLY PROHIBITED from clustering
-  personas into a single category. You MUST maximise demographic
-  variance: each persona should differ meaningfully from the others
-  on EVERY wildcard dimension.
-
-  The resulting 10-persona cohort must represent the WIDEST possible
-  spectrum of humanity relevant to the product concept.
-`
-    : '';
-
-  return `You are an advanced market research focus group simulator.
-Based on the provided demographic parameters below, generate EXACTLY 10 distinct, highly realistic fictional consumer personas.
-Simulate their unique lifestyle details, and their unfiltered reactions to the product concept and developer's specific question.
-${wildcardBlock}
-═══════════════════════════════════════════════════════════════════
-  SIMULATION CONFIGURATION
-═══════════════════════════════════════════════════════════════════
-- TARGET AGE RANGE        : ${resolvedAge}
-- TARGET GENDER           : ${resolvedGender}
-- HABITS / LIFESTYLE      : ${resolvedHabits}
-- LOCATION                : ${resolvedLocation}
-- INCOME LEVEL            : ${resolvedIncome}
-- QUESTION / PRODUCT INFO : ${data.questionOrProductInfo || 'General product concept evaluation'}
-${buildAbTestBlock(data)}
-═══════════════════════════════════════════════════════════════════
+// Shared by new-panel and re-used-panel prompts so scores stay comparable.
+const SCORING_RULES = `═══════════════════════════════════════════════════════════════════
   SENTIMENTSCORE — MANDATORY CALIBRATION RULES
 ═══════════════════════════════════════════════════════════════════
 
@@ -389,7 +312,109 @@ ${buildAbTestBlock(data)}
      sentimentScore : 4
      WHY CORRECT: Core identity conflict = near-zero adoption likelihood.
 
+`;
+
+/** Extra prompt section for A/B tests; empty when only one variant is given. */
+function buildAbTestBlock(data: CustomerData): string {
+  const variants = variantTexts(data);
+  if (variants.length < 2) return '';
+
+  const list = variants
+    .map((text, i) => `  VARIANT ${VARIANT_LETTERS[i]}: ${text}`)
+    .join('\n');
+  const altLetters = VARIANT_LETTERS.slice(1, variants.length).join(', ');
+
+  return `
 ═══════════════════════════════════════════════════════════════════
+  A/B TEST — ${variants.length} VARIANTS SHOWN TO THE SAME PERSONAS
+═══════════════════════════════════════════════════════════════════
+${list}
+
+  • The QUESTION / PRODUCT INFO above is VARIANT A.
+  • Every persona sees EVERY variant. The top-level sentimentScore,
+    answerToQuestion, feedback and keywords are their reaction to VARIANT A.
+  • "alternatives" must contain their reaction to variant ${altLetters}, in that order.
+  • Score each variant INDEPENDENTLY with the same rubric below. The same
+    persona may love one variant and reject another — differences in price,
+    features, or messaging must move the score realistically. Do not copy
+    the Variant A score by default.
+  • Each variant's answerToQuestion should respond to THAT variant and may
+    compare it to the others where natural.
+`;
+}
+
+function buildPersonaPrompt(data: CustomerData): string {
+  // ── Per-field diversity directives ─────────────────────────────────────
+  // Each one tells the LLM exactly how to spread a single dimension across
+  // the 10-persona cohort. Being explicit prevents the model from
+  // defaulting to a narrow "safe" cluster.
+  const ageDirective =
+    '🔀 DIVERSE_RANDOM — You MUST spread ages across the full human lifespan: ' +
+    'include at least one child/teen (8–17), young adults (18–29), ' +
+    'middle-aged adults (30–54), and seniors (55+). ' +
+    'No two personas should share the same age bracket.';
+
+  const genderDirective =
+    '🔀 DIVERSE_RANDOM — You MUST vary gender representation: ' +
+    'include a realistic mix of male, female, and non-binary identities across the 10 personas.';
+
+  const habitsDirective =
+    '🔀 DIVERSE_RANDOM — You MUST assign sharply contrasting lifestyles: ' +
+    'mix tech-savvy early adopters, outdoor enthusiasts, homebodies, ' +
+    'fitness-focused individuals, budget-conscious shoppers, luxury seekers, ' +
+    'creatives, remote workers, students, and retirees. ' +
+    'No two personas should have similar lifestyle profiles.';
+
+  const locationDirective =
+    '🔀 DIVERSE_RANDOM — You MUST scatter geographic backgrounds: ' +
+    'include major global cities, mid-size towns, suburban areas, and rural regions ' +
+    'across different countries/continents. Ensure geographic and cultural diversity.';
+
+  const incomeDirective =
+    '🔀 DIVERSE_RANDOM — You MUST distribute income levels across the full economic spectrum: ' +
+    'include poverty/student-level, lower-middle, middle, upper-middle, and high-income personas. ' +
+    'At least one persona should face genuine financial constraints for the product.';
+
+  const resolvedAge      = resolveField(data.ageRange,    ageDirective,      'No specific constraint (please simulate a broad age cohort)');
+  const resolvedGender   = resolveField(data.gender,      genderDirective,   'No specific constraint (simulate diverse representation)');
+  const resolvedHabits   = resolveField(data.habits,      habitsDirective,   'Complement dynamically with realistic consumer lifestyles');
+  const resolvedLocation = resolveField(data.location,    locationDirective, 'Complement with standard suburban/urban locations');
+  const resolvedIncome   = resolveField(data.incomeLevel, incomeDirective,   'Complement with standard household income metrics');
+
+  // Count how many fields are in wildcard mode so we can inject a top-level reminder
+  const wildcardFields = [data.ageRange, data.gender, data.habits, data.location, data.incomeLevel]
+    .filter(v => !v?.trim() || v.trim() === DIVERSE_RANDOM);
+  const wildcardBlock = wildcardFields.length > 0
+    ? `
+═══════════════════════════════════════════════════════════════════
+  ⚡ TOTAL COHORT DIVERSITY MODE  (${wildcardFields.length} of 5 fields randomised)
+═══════════════════════════════════════════════════════════════════
+  Fields marked 🔀 DIVERSE_RANDOM below are in WILDCARD mode.
+  For every such field you are STRICTLY PROHIBITED from clustering
+  personas into a single category. You MUST maximise demographic
+  variance: each persona should differ meaningfully from the others
+  on EVERY wildcard dimension.
+
+  The resulting 10-persona cohort must represent the WIDEST possible
+  spectrum of humanity relevant to the product concept.
+`
+    : '';
+
+  return `You are an advanced market research focus group simulator.
+Based on the provided demographic parameters below, generate EXACTLY 10 distinct, highly realistic fictional consumer personas.
+Simulate their unique lifestyle details, and their unfiltered reactions to the product concept and developer's specific question.
+${wildcardBlock}
+═══════════════════════════════════════════════════════════════════
+  SIMULATION CONFIGURATION
+═══════════════════════════════════════════════════════════════════
+- TARGET AGE RANGE        : ${resolvedAge}
+- TARGET GENDER           : ${resolvedGender}
+- HABITS / LIFESTYLE      : ${resolvedHabits}
+- LOCATION                : ${resolvedLocation}
+- INCOME LEVEL            : ${resolvedIncome}
+- QUESTION / PRODUCT INFO : ${data.questionOrProductInfo || 'General product concept evaluation'}
+${buildAbTestBlock(data)}
+${SCORING_RULES}═══════════════════════════════════════════════════════════════════
   PERSONA GENERATION INSTRUCTIONS
 ═══════════════════════════════════════════════════════════════════
 
@@ -411,25 +436,46 @@ CRITICAL — "answerToQuestion" field:
 `;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STEP 1 – Non-streaming (used internally to get full persona JSON first)
-// thinkingBudget: 0  — JSON schema generation needs no deep reasoning
-// ─────────────────────────────────────────────────────────────────────────────
-export async function generatePersonaBatch(data: CustomerData): Promise<Persona[]> {
-  const ai = getGemini();
-  const alternativeCount = data.alternativeVariants?.length ?? 0;
-  const response = await ai.models.generateContent({
-    model: "gemini-3.1-flash-lite",
-    contents: buildPersonaPrompt(data),
-    config: {
-      temperature: 0.82,
-      responseMimeType: "application/json",
-      responseSchema: personaResponseSchema(alternativeCount),
-      thinkingConfig: { thinkingBudget: 1024 }, // ✅ Light thinking ON — reasoning budget needed for score-to-circumstance alignment
-    },
-  });
+/** Prompt for re-using a saved panel: the people are fixed, only their answers are new. */
+function buildPanelPrompt(data: CustomerData, panel: PanelPersona[]): string {
+  const participants = panel
+    .map((p) => `- id ${p.id}: ${p.name}, ${p.age}, ${p.gender}, ${p.location}. Income/job: ${p.incomeLevel}. Lifestyle: ${p.habits}. Background: ${p.background}`)
+    .join('\n');
 
-  const rawText = response.text ?? "";
+  return `You are an advanced market research focus group simulator.
+You are re-convening an EXISTING panel of ${panel.length} consumers who have taken part in earlier
+sessions. Do NOT invent new people and do NOT change who they are — answer as each of
+these exact participants, consistent with their age, income, lifestyle, values and background.
+
+═══════════════════════════════════════════════════════════════════
+  PANEL PARTICIPANTS (fixed)
+═══════════════════════════════════════════════════════════════════
+${participants}
+
+═══════════════════════════════════════════════════════════════════
+  TODAY'S QUESTION / PRODUCT INFO
+═══════════════════════════════════════════════════════════════════
+${data.questionOrProductInfo || 'General product concept evaluation'}
+${buildAbTestBlock(data)}
+${SCORING_RULES}═══════════════════════════════════════════════════════════════════
+  RESPONSE INSTRUCTIONS
+═══════════════════════════════════════════════════════════════════
+
+Return exactly one response per participant, in the order listed, copying each
+participant's id exactly.
+
+CRITICAL — "feedback" field:
+  The participant's honest, blunt, unfiltered reaction (approximately 20 words),
+  emotionally consistent with their sentimentScore.
+
+CRITICAL — "answerToQuestion" field:
+  Their direct, detailed answer to TODAY'S QUESTION, grounded in their profile
+  and consistent with their sentimentScore.
+`;
+}
+
+/** Parses the model's JSON array output, tolerating stray markdown fences. */
+function parseJsonArray(rawText: string): unknown[] {
   const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
 
   // Parse JSON in a dedicated try/catch so we can give a clear error message
@@ -446,9 +492,58 @@ export async function generatePersonaBatch(data: CustomerData): Promise<Persona[
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error("AI returned an empty or non-array response.");
   }
+  return parsed;
+}
 
-  // Validate every persona — throws immediately on the first structural problem
-  return parsed.map((item, index) => validatePersona(item, index, alternativeCount));
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 1 – Non-streaming (used internally to get full persona JSON first)
+// thinkingBudget: 0  — JSON schema generation needs no deep reasoning
+// ─────────────────────────────────────────────────────────────────────────────
+// When `panel` is given, the same people answer again (persona re-use) and
+// only their responses are generated.
+export async function generatePersonaBatch(data: CustomerData, panel?: PanelPersona[]): Promise<Persona[]> {
+  const ai = getGemini();
+  const alternativeCount = data.alternativeVariants?.length ?? 0;
+  const response = await ai.models.generateContent({
+    model: "gemini-3.1-flash-lite",
+    contents: panel ? buildPanelPrompt(data, panel) : buildPersonaPrompt(data),
+    config: {
+      temperature: 0.82,
+      responseMimeType: "application/json",
+      responseSchema: panel
+        ? panelResponseSchema(alternativeCount, panel.length)
+        : personaResponseSchema(alternativeCount),
+      thinkingConfig: { thinkingBudget: 1024 }, // ✅ Light thinking ON — reasoning budget needed for score-to-circumstance alignment
+    },
+  });
+
+  const parsed = parseJsonArray(response.text ?? "");
+
+  if (!panel) {
+    // Validate every persona — throws immediately on the first structural problem
+    return parsed.map((item, index) => validatePersona(item, index, alternativeCount));
+  }
+
+  // Attach each answer to its panel participant: match by id first, then give
+  // any unmatched answers to the unmatched participants in order, so no answer
+  // is used twice. The stored profile always wins, so the model cannot alter
+  // who a participant is.
+  const answers = parsed.filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null);
+  const used = new Set<Record<string, unknown>>();
+  const assigned = panel.map((person) => {
+    const match = answers.find((r) => !used.has(r) && r.id === person.id);
+    if (match) used.add(match);
+    return match;
+  });
+  const leftovers = answers.filter((r) => !used.has(r));
+
+  return panel.map((person, index) => {
+    const answer = assigned[index] ?? leftovers.shift();
+    if (!answer) {
+      throw new Error(`AI returned no response for panel participant ${person.name}.`);
+    }
+    return validatePersona({ ...answer, ...person }, index, alternativeCount);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

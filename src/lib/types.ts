@@ -25,6 +25,9 @@ export interface Persona extends VariantResponse {
   alternatives?: VariantResponse[];
 }
 
+/** Who a persona is, without any answers — what a saved panel stores. */
+export type PanelPersona = Omit<Persona, keyof VariantResponse | "alternatives">;
+
 export interface CustomerData {
   ageRange?: string;
   gender?: string;
@@ -52,9 +55,44 @@ export interface ChatTurn {
 // ─────────────────────────────────────────────────────────────────────────────
 export const DIVERSE_RANDOM = "DIVERSE_RANDOM" as const;
 
+/** A completed simulation, as stored in the database. */
+export interface SavedRun {
+  id: string;
+  createdAt: string; // ISO timestamp
+  customerData: CustomerData;
+  personas: Persona[];
+  report: string;
+  /** Interview transcripts keyed by persona index. */
+  chats: Record<number, ChatTurn[]>;
+  /** The saved panel these personas came from, if any. */
+  panelId: string | null;
+  /** Public share link id; null when sharing is off. */
+  shareId: string | null;
+}
+
+/** A read-only run as shown on a public share link (no interview transcripts). */
+export type SharedRun = Omit<SavedRun, "chats" | "panelId" | "shareId">;
+
+/** A saved persona cohort that can be re-used for new simulations. */
+export interface Panel {
+  id: string;
+  name: string;
+  createdAt: string;
+  /** Demographic settings the panel was recruited with. */
+  customerData: CustomerData;
+  personas: PanelPersona[];
+}
+
+/** Body of POST /api/simulate. */
+export interface SimulateRequest extends CustomerData {
+  /** Re-use the people from this saved panel instead of recruiting new ones. */
+  panelId?: string;
+}
+
 // One line of the newline-delimited JSON stream returned by POST /api/simulate
 export type SimulateEvent =
   | { type: "personas"; personas: Persona[] }
   | { type: "report"; delta: string }
+  | { type: "saved"; run: SavedRun }
   | { type: "error"; message: string }
   | { type: "done" };
