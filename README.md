@@ -2,8 +2,6 @@
 
 English | [日本語](README.ja.md)
 
-**[Try the live demo →](https://market-mind-ai-gamma.vercel.app)**
-
 A simulated focus group for marketers. Describe a target market and a
 product idea, and MarketMind AI uses Gemini to recruit ten realistic virtual
 consumer personas, has each of them answer your question, streams an
