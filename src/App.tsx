@@ -7,6 +7,7 @@ import { InsightsViewer } from './components/InsightsViewer';
 import { PersonaChat, type ChatMessage } from './components/PersonaChat';
 import { HistoryPanel } from './components/HistoryPanel';
 import { AuthScreen } from './components/AuthScreen';
+import { GuestAccountCard } from './components/GuestAccountCard';
 import { RunActions } from './components/RunActions';
 import * as api from './lib/api';
 import { auth, isSupabaseConfigured } from './lib/supabase';
@@ -61,10 +62,16 @@ export default function App() {
   if (!authReady) return <FullScreenMessage><Loader2 className="w-5 h-5 animate-spin" /> Loading...</FullScreenMessage>;
   if (!session) return <AuthScreen />;
   // Keyed by user so signing in as someone else starts from a clean state
-  return <Workspace key={session.user.id} email={session.user.email ?? ''} />;
+  return (
+    <Workspace
+      key={session.user.id}
+      email={session.user.email ?? ''}
+      isGuest={session.user.is_anonymous === true}
+    />
+  );
 }
 
-function Workspace({ email }: { email: string }) {
+function Workspace({ email, isGuest }: { email: string; isGuest: boolean }) {
   const [activeTab, setActiveTab] = useState<Tab>('data');
 
   // Saved data from the API
@@ -288,20 +295,26 @@ function Workspace({ email }: { email: string }) {
         </nav>
 
         <div className="p-6 pt-0 mt-auto space-y-4">
-          <div className="p-4 bg-gradient-to-br from-blue-500/10 to-indigo-500/5 rounded-2xl border border-blue-500/15">
-            <p className="text-xs font-semibold text-blue-300 mb-1">Empirical Focus Group</p>
-            <p className="text-[11px] text-blue-200/50 leading-relaxed">
-              I recruit, simulate, and analyze 10 specific consumer avatars to stress test your messaging and questions.
-            </p>
-          </div>
+          {isGuest ? (
+            <GuestAccountCard />
+          ) : (
+            <div className="p-4 bg-gradient-to-br from-blue-500/10 to-indigo-500/5 rounded-2xl border border-blue-500/15">
+              <p className="text-xs font-semibold text-blue-300 mb-1">Empirical Focus Group</p>
+              <p className="text-[11px] text-blue-200/50 leading-relaxed">
+                I recruit, simulate, and analyze 10 specific consumer avatars to stress test your messaging and questions.
+              </p>
+            </div>
+          )}
           <div className="flex items-center gap-2">
-            <span className="flex-1 min-w-0 text-xs text-slate-500 truncate" title={email}>{email}</span>
+            <span className="flex-1 min-w-0 text-xs text-slate-500 truncate" title={isGuest ? 'Guest session' : email}>
+              {isGuest ? 'Guest' : email}
+            </span>
             <button
               onClick={() => { rememberActiveRun(null); auth.signOut(); }}
               className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200"
-              title="Sign out"
+              title={isGuest ? 'End the guest session' : 'Sign out'}
             >
-              <LogOut className="w-3.5 h-3.5" /> Sign out
+              <LogOut className="w-3.5 h-3.5" /> {isGuest ? 'Exit guest' : 'Sign out'}
             </button>
           </div>
         </div>
@@ -365,6 +378,7 @@ function Workspace({ email }: { email: string }) {
                     <RunActions
                       run={currentRun}
                       panels={panels}
+                      isGuest={isGuest}
                       onRunUpdated={replaceRun}
                       onPanelCreated={(panel) => setPanels((prev) => [panel, ...prev])}
                     />

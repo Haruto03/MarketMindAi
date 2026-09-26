@@ -24,6 +24,11 @@ function envInt(name: string, fallback: number): number {
 // Per-user limits (stored in the database, so they survive restarts)
 const SIMULATIONS_PER_HOUR = envInt("SIMULATIONS_PER_HOUR", 10);
 const CHAT_MESSAGES_PER_HOUR = envInt("CHAT_MESSAGES_PER_HOUR", 100);
+// Guests (anonymous sign-in) get a smaller allowance. A guest account costs
+// nothing to create, so this is what stops one visitor spending the day's
+// whole AI budget before anyone else gets to try the app.
+const GUEST_SIMULATIONS_PER_HOUR = envInt("GUEST_SIMULATIONS_PER_HOUR", 2);
+const GUEST_CHAT_MESSAGES_PER_HOUR = envInt("GUEST_CHAT_MESSAGES_PER_HOUR", 20);
 // Whole-service limits, a hard ceiling on spend regardless of how many users call
 const DAILY_SIMULATION_CAP = envInt("DAILY_SIMULATION_CAP", 200);
 const DAILY_CHAT_CAP = envInt("DAILY_CHAT_CAP", 2000);
@@ -70,6 +75,13 @@ const middleware = (fn: (req: Request, res: Response) => Promise<void>): Request
   (req, res, next) => { fn(req, res).then(() => next(), next); };
 
 const currentUser = (res: Response): User => res.locals.user as User;
+
+/**
+ * True for a visitor who signed in anonymously ("Continue as guest").
+ * Supabase sets is_anonymous on the user and in the JWT, so this cannot be
+ * claimed by the browser.
+ */
+const isGuest = (user: User): boolean => user.is_anonymous === true;
 
 function publicAiErrorMessage(error: unknown): string {
   const status = (error as { status?: number })?.status;
@@ -143,13 +155,20 @@ const requireUser = middleware(async (req, res) => {
 });
 
 /**
- * Checks the user's hourly allowance and the service-wide daily cap for an AI
- * call, then records the call. Recording happens before the AI request so
- * failed or abandoned requests still count against the limit.
+ * Checks the caller's hourly allowance and the service-wide daily cap for an
+ * AI call, then records the call. Recording happens before the AI request so
+ * failed or abandoned requests still count against the limit. Guests have
+ * their own, smaller hourly allowance.
  */
-function usageGuard(kind: db.UsageKind, perHour: number, perDay: number, messages: { hour: string; day: string }) {
+function usageGuard(
+  kind: db.UsageKind,
+  limits: { perHour: number; guestPerHour: number; perDay: number },
+  messages: { hour: (limit: number, guest: boolean) => string; day: string },
+) {
   return middleware(async (_req, res) => {
     const user = currentUser(res);
+    const guest = isGuest(user);
+    const perHour = guest ? limits.guestPerHour : limits.perHour;
     const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const startOfUtcDay = `${new Date().toISOString().slice(0, 10)}T00:00:00Z`;
 
@@ -157,20 +176,41 @@ function usageGuard(kind: db.UsageKind, perHour: number, perDay: number, message
       db.countUserUsage(user.id, kind, hourAgo),
       db.countAllUsage(kind, startOfUtcDay),
     ]);
-    if (userCount >= perHour) throw new HttpError(429, messages.hour);
-    if (allCount >= perDay) throw new HttpError(429, messages.day);
+    if (userCount >= perHour) throw new HttpError(429, messages.hour(perHour, guest));
+    if (allCount >= limits.perDay) throw new HttpError(429, messages.day);
     await db.recordUsage(user.id, kind);
   });
 }
 
-const simulationAllowance = usageGuard("simulation", SIMULATIONS_PER_HOUR, DAILY_SIMULATION_CAP, {
-  hour: `You can run up to ${SIMULATIONS_PER_HOUR} simulations per hour. Please try again later.`,
-  day: "The daily simulation limit for this service has been reached. Please try again tomorrow.",
-});
+const simulationAllowance = usageGuard(
+  "simulation",
+  { perHour: SIMULATIONS_PER_HOUR, guestPerHour: GUEST_SIMULATIONS_PER_HOUR, perDay: DAILY_SIMULATION_CAP },
+  {
+    hour: (limit, guest) =>
+      guest
+        ? `Guests can run up to ${limit} simulations per hour. Create a free account to keep going.`
+        : `You can run up to ${limit} simulations per hour. Please try again later.`,
+    day: "The daily simulation limit for this service has been reached. Please try again tomorrow.",
+  },
+);
 
-const chatAllowance = usageGuard("chat", CHAT_MESSAGES_PER_HOUR, DAILY_CHAT_CAP, {
-  hour: `You can send up to ${CHAT_MESSAGES_PER_HOUR} interview messages per hour. Please try again later.`,
-  day: "The daily interview limit for this service has been reached. Please try again tomorrow.",
+const chatAllowance = usageGuard(
+  "chat",
+  { perHour: CHAT_MESSAGES_PER_HOUR, guestPerHour: GUEST_CHAT_MESSAGES_PER_HOUR, perDay: DAILY_CHAT_CAP },
+  {
+    hour: (limit, guest) =>
+      guest
+        ? `Guests can send up to ${limit} interview messages per hour. Create a free account to keep going.`
+        : `You can send up to ${limit} interview messages per hour. Please try again later.`,
+    day: "The daily interview limit for this service has been reached. Please try again tomorrow.",
+  },
+);
+
+/** Public share links are for account holders: a guest link has no owner who can take it down. */
+const requireAccount = middleware(async (_req, res) => {
+  if (isGuest(currentUser(res))) {
+    throw new HttpError(403, "Create a free account to share a simulation publicly.");
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,7 +319,7 @@ app.delete("/api/runs/:id", requireUser, route(async (req, res) => {
 }));
 
 /** Turns on the public share link (idempotent — keeps an existing link). */
-app.post("/api/runs/:id/share", requireUser, route(async (req, res) => {
+app.post("/api/runs/:id/share", requireUser, requireAccount, route(async (req, res) => {
   const userId = currentUser(res).id;
   const runId = uuid(req.params.id, "id");
   const existing = await db.getRun(userId, runId);

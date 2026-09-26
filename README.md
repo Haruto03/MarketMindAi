@@ -43,6 +43,22 @@ changed their minds.
 interview transcripts — is saved to the user's account and can be reopened
 from the Saved Simulations tab.
 
+**Guest mode.** *Continue as guest* starts an anonymous Supabase session, so
+the app can be tried without signing up. A guest is a real (anonymous) user,
+which means every request is still authenticated and every query is still
+scoped to them — the security model is unchanged. What differs:
+
+| | Guest | Account |
+|---|---|---|
+| Simulations per hour | 2 | 10 |
+| Interview messages per hour | 20 | 100 |
+| Runs, interviews, panels, exports | yes | yes |
+| Public share links | no | yes |
+| Work survives on another device | no — the session lives in this browser | yes |
+
+Adding an email and password from the sidebar upgrades the anonymous user in
+place, so everything a guest has already run carries over to the new account.
+
 **Re-usable panels.** Save the ten people from any result as a named panel,
 then ask that same panel new questions later. Only their answers are
 regenerated — who they are stays fixed — so results can be compared across
@@ -80,6 +96,8 @@ token on every request, and exposes the API:
 - Usage limits are enforced per user and service-wide from a
   `usage_events` table, so they survive restarts and work across multiple
   server instances. An additional per-IP limit guards the whole API.
+- Guest status comes from the `is_anonymous` claim that Supabase puts on the
+  user, so the browser cannot claim to be a full account to lift its limits.
 - Requests are validated and size-limited; CSV exports neutralise
   spreadsheet formula injection.
 
@@ -152,7 +170,14 @@ automatically; emails the app sends appear in Mailpit at
    the migration SQL into the dashboard's SQL editor.
 2. In **Authentication → URL Configuration**, set the Site URL to your
    deployed domain (used in confirmation emails).
-3. Build and run:
+3. For guest mode, turn on **Authentication → Sign In / Providers →
+   Anonymous sign-ins**. It is off by default in a hosted project; locally it
+   is already enabled in [`supabase/config.toml`](supabase/config.toml).
+   Turning on a CAPTCHA in the same section is worth it — it is what stops a
+   script minting guest sessions in bulk. Anonymous users pile up in
+   `auth.users`, so delete stale ones periodically (they cascade to their
+   runs and panels).
+4. Build and run:
 
 ```bash
 npm run build   # client bundle in dist/, server bundle in build/server.js

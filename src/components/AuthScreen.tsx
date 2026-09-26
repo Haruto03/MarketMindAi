@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BrainCircuit, Loader2, AlertCircle, MailCheck } from 'lucide-react';
+import { BrainCircuit, Loader2, AlertCircle, MailCheck, UserRound } from 'lucide-react';
 import { auth } from '../lib/supabase';
 import { cn } from '../lib/utils';
 
@@ -12,8 +12,26 @@ export function AuthScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+  const [guestBusy, setGuestBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkEmail, setCheckEmail] = useState(false);
+
+  const continueAsGuest = async () => {
+    setError(null);
+    setGuestBusy(true);
+    try {
+      const { error } = await auth.signInAnonymously();
+      if (error) throw error;
+      // App's auth listener swaps this screen for the workspace
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Could not start a guest session: ${err.message}`
+          : 'Could not start a guest session. Please try again.',
+      );
+      setGuestBusy(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -131,13 +149,32 @@ export function AuthScreen() {
 
                 <button
                   type="submit"
-                  disabled={busy}
+                  disabled={busy || guestBusy}
                   className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold rounded-xl transition-colors"
                 >
                   {busy && <Loader2 className="w-4 h-4 animate-spin" />}
                   {mode === 'signIn' ? 'Sign in' : 'Create account'}
                 </button>
               </form>
+
+              <div className="flex items-center gap-3 my-5" aria-hidden="true">
+                <span className="h-px flex-1 bg-slate-800" />
+                <span className="text-[11px] uppercase tracking-wider text-slate-600">or</span>
+                <span className="h-px flex-1 bg-slate-800" />
+              </div>
+
+              <button
+                type="button"
+                onClick={continueAsGuest}
+                disabled={busy || guestBusy}
+                className="w-full flex items-center justify-center gap-2 py-3 bg-slate-800/70 hover:bg-slate-800 disabled:opacity-60 text-slate-200 font-semibold rounded-xl border border-slate-700 transition-colors"
+              >
+                {guestBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserRound className="w-4 h-4" />}
+                Continue as guest
+              </button>
+              <p className="text-xs text-slate-500 mt-2 text-center">
+                Try it without signing up. Guest work stays in this browser and gets a smaller hourly allowance.
+              </p>
             </>
           )}
         </div>

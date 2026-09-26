@@ -10,6 +10,8 @@ import { PrintReport } from './PrintReport';
 interface RunActionsProps {
   run: SavedRun;
   panels: Panel[];
+  /** Guests can export and save panels, but not publish a public share link. */
+  isGuest: boolean;
   onRunUpdated: (run: SavedRun) => void;
   onPanelCreated: (panel: Panel) => void;
 }
@@ -18,7 +20,7 @@ const buttonClass =
   "flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-300 hover:text-slate-100 hover:bg-slate-800/70 rounded-xl border border-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
 
 /** Export, share and save-as-panel controls for a saved run. */
-export function RunActions({ run, panels, onRunUpdated, onPanelCreated }: RunActionsProps) {
+export function RunActions({ run, panels, isGuest, onRunUpdated, onPanelCreated }: RunActionsProps) {
   const [open, setOpen] = useState<'export' | 'share' | 'panel' | null>(null);
   const [printing, setPrinting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -213,6 +215,11 @@ export function RunActions({ run, panels, onRunUpdated, onPanelCreated }: RunAct
                   Stop sharing (link stops working)
                 </button>
               </>
+            ) : isGuest ? (
+              <p className="text-xs text-slate-400">
+                Public share links need an account, so there is always someone who can take the link down.
+                Create one from the panel in the sidebar — your simulations come with you.
+              </p>
             ) : (
               <>
                 <p className="text-xs text-slate-400">
