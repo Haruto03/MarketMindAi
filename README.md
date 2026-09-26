@@ -15,6 +15,16 @@ one-on-one.
 Built by Haruto Iriyama with React, TypeScript, Vite, Tailwind CSS, Express
 and Supabase.
 
+![Results of a run: stat tiles for the cohort size, the average sentiment score and how many personas are likely adopters, above two persona cards — an enthusiastic software engineer scoring 92/100 and a sceptical accountant scoring 25/100, each with their profile, verbatim answer and feedback](docs/screenshot-results.png)
+
+<sub>A real run: "Would you pay $15/month for a smart home appliance manager…"
+answered by ten generated personas.</sub>
+
+| | |
+|---|---|
+| ![Charts tab: a bar chart of how many personas fall in each adoption-likelihood band, and a bar chart of the most-used theme keywords](docs/screenshot-charts.png) | ![Interview tab: the list of ten participants with their scores on the left, and a one-on-one chat with one of them on the right](docs/screenshot-interviews.png) |
+| Charts — score distribution and recurring themes | Interviews — question any participant in character |
+
 ## How it works
 
 1. **Configure the focus group.** Age range, gender, habits, location and
