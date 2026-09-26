@@ -2,6 +2,10 @@
 
 English | [日本語](README.ja.md)
 
+**[Try the live demo →](https://marketmind-ai-2kew.onrender.com)** — no sign-up
+needed, there is a *Continue as guest* button. It runs on a free instance that
+sleeps when idle, so the first load can take about a minute to wake.
+
 A simulated focus group for marketers. Describe a target market and a
 product idea, and MarketMind AI uses Gemini to recruit ten realistic virtual
 consumer personas, has each of them answer your question, streams an
