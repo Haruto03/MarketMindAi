@@ -1,0 +1,33 @@
+# Render blueprint. In Render: New → Blueprint → pick this repository.
+#
+# The app is a single Node process: Express serves the API and the built
+# client from one port. Nothing here is secret — the four values marked
+# sync: false are entered in the Render dashboard (or the Blueprint prompt)
+# and never committed.
+services:
+  - type: web
+    name: marketmind-ai
+    runtime: node
+    plan: free # free instances sleep after ~15 min idle and take ~1 min to wake
+    region: singapore # oregon | frankfurt | singapore | ohio | virginia
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeployTrigger: commit
+    envVars:
+      # VITE_* are read at build time and compiled into the client bundle.
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      # Server-only secrets. Never prefix these with VITE_.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Render terminates TLS in front of the app, so per-IP limits need to
+      # read the forwarded client address.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: NODE_VERSION
+        value: "22"

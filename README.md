@@ -190,5 +190,28 @@ npm start       # serves the app and API on $PORT (default 3000)
 never commit them. Set `TRUST_PROXY=1` behind a reverse proxy (Cloud Run,
 Render, Railway, Nginx…) so per-IP limits see real client IPs.
 
+### Where to host it
+
+One Node process serves both the API and the built client, so the app wants a
+host that keeps a process running — Render, Railway, Fly.io, Cloud Run. Two
+things in the design depend on that: `/api/simulate` streams a response for as
+long as the AI takes, and it finishes writing the run even if the browser
+disconnects. A static host, or a serverless platform with a short execution
+limit, will cut those off partway.
+
+[`render.yaml`](render.yaml) is a ready-made blueprint: in Render choose
+**New → Blueprint**, pick this repository, and enter the four secrets when
+prompted (`TRUST_PROXY` and the Node version are already set). To do it by
+hand instead, create a **Web Service** with build command
+`npm ci && npm run build` and start command `npm start`, then add all five
+variables. Render exposes environment variables during the build too, which
+is what lets the `VITE_*` values reach the client bundle.
+
+Once it is live, set the Supabase **Site URL** to the deployed URL so
+confirmation emails point at the right place. On Render's free instance type
+the service sleeps after about 15 minutes of inactivity and takes roughly a
+minute to wake, which is worth knowing before putting the link somewhere
+people will click it cold.
+
 See [SETUP_GUIDE.md](SETUP_GUIDE.md) for a step-by-step walkthrough aimed at
 non-developers.
