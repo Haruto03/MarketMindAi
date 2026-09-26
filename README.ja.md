@@ -159,10 +159,17 @@ npm run dev
    (確認メールで使用されます)。
 3. ゲストモードを使うには **Authentication → Sign In / Providers → Anonymous sign-ins** を
    有効にします。ホスティング環境では既定で無効です(ローカルでは
-   [`supabase/config.toml`](supabase/config.toml) で有効化済み)。同じ画面で CAPTCHA も
-   有効にしておくことを勧めます。スクリプトによるゲストセッションの大量生成を防げるのは
-   これです。匿名ユーザーは `auth.users` に蓄積していくので、古いものは定期的に削除して
-   ください(紐づく実行結果とパネルも連動して削除されます)。
+   [`supabase/config.toml`](supabase/config.toml) で有効化済み)。匿名ユーザーは
+   `auth.users` に蓄積していくので、古いものは定期的に削除してください(紐づく実行結果と
+   パネルも連動して削除されます)。
+
+   **Supabase の CAPTCHA(Bot and Abuse Protection)はまだ有効にしないでください。**
+   有効にすると認証エンドポイントが captcha トークン必須になりますが、現在のクライアントは
+   トークンを送っていないため、サインイン・新規登録・ゲストセッションがすべて失敗します。
+   導入するには hCaptcha か Turnstile のウィジェットを画面に組み込み、
+   `signInWithPassword` / `signUp` / `signInAnonymously` の 3 つすべてに
+   `options: { captchaToken }` を渡す必要があります。公開後にゲストの悪用が現実的な懸念に
+   なった時点で対応する価値はありますが、トグル 1 つでは終わらずコード変更を伴います。
 4. ビルドして起動します:
 
 ```bash

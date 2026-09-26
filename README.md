@@ -173,10 +173,16 @@ automatically; emails the app sends appear in Mailpit at
 3. For guest mode, turn on **Authentication → Sign In / Providers →
    Anonymous sign-ins**. It is off by default in a hosted project; locally it
    is already enabled in [`supabase/config.toml`](supabase/config.toml).
-   Turning on a CAPTCHA in the same section is worth it — it is what stops a
-   script minting guest sessions in bulk. Anonymous users pile up in
-   `auth.users`, so delete stale ones periodically (they cascade to their
-   runs and panels).
+   Anonymous users pile up in `auth.users`, so delete stale ones periodically
+   (they cascade to their runs and panels).
+
+   **Do not switch on Supabase's CAPTCHA (Bot and Abuse Protection) yet.** It
+   makes every auth endpoint require a captcha token, and this client does not
+   send one — sign-in, sign-up and guest sessions would all start failing.
+   Adding it means rendering an hCaptcha or Turnstile widget and passing
+   `options: { captchaToken }` to `signInWithPassword`, `signUp` and
+   `signInAnonymously`. Worth doing once the app is public and guest abuse is
+   a real concern, but it is a code change, not just a toggle.
 4. Build and run:
 
 ```bash
